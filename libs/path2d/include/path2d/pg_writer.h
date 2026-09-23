@@ -38,39 +38,48 @@ typedef struct {
 } pg_path_writer_t;
 
 /**
- * Fixed-capacity pg_cmd_t collector. Writes into caller-owned storage, uses
- * no heap and keeps the commands it accepted when a later command overflows
- * (the error is reported through the callback result and the overflowed
- * flag, so the partial content is never silently accepted).
+ * Fixed-capacity pg_cmd_t collector. Writes into caller-owned storage and
+ * uses no heap.
+ *
+ * Failure model: the first callback failure of any kind (capacity, missing
+ * MOVE, non-finite coordinates, NULL storage) moves the buffer into a
+ * poisoned state that remembers the original result code. Poisoned buffers
+ * reject every further write with that code and can never be exported.
  */
 typedef struct {
-    pg_cmd_t *cmds;   /**< Caller-owned command array (borrowed). */
-    uint16_t capacity; /**< Capacity in commands. */
-    uint16_t count;   /**< Commands accepted so far. */
-    bool overflowed;  /**< Set once a command was rejected for capacity. */
+    pg_cmd_t *cmds;      /**< Caller-owned command array (borrowed). */
+    uint16_t capacity;   /**< Capacity in commands. */
+    uint16_t count;      /**< Commands accepted so far. */
+    bool poisoned;       /**< Set on the first failure; sticky. */
+    pg_result_t failure; /**< Original failure code (PG_OK while healthy). */
 } pg_path_buffer_t;
 
 /**
  * @brief Initializes a buffer over caller-owned storage.
  *
  * @param[out] buffer    Buffer to initialize. Cannot be NULL.
- * @param[in]  cmds      Command storage. Cannot be NULL for a usable buffer.
- * @param[in]  capacity  Capacity in commands (0 makes every write fail with
- *                       PG_ERR_WORKSPACE_TOO_SMALL).
+ * @param[in]  cmds      Command storage. NULL (or zero capacity) poisons the
+ *                       buffer with PG_ERR_INVALID_ARG and makes every write
+ *                       fail; no crash.
+ * @param[in]  capacity  Capacity in commands.
+ * @return               PG_OK when usable; PG_ERR_INVALID_ARG for a NULL
+ *                       buffer or unusable storage.
  */
-void pg_path_buffer_init(pg_path_buffer_t *buffer, pg_cmd_t *cmds,
-                         uint16_t capacity);
+pg_result_t pg_path_buffer_init(pg_path_buffer_t *buffer, pg_cmd_t *cmds,
+                                uint16_t capacity);
 
 /**
  * @brief Builds a pg_path_writer_t that appends to `buffer`.
  *
  * @param[in] buffer  Target buffer; must outlive the returned writer.
- * @return            Writer with all four callbacks set and ctx = buffer.
+ * @return            Writer with the four callbacks set and ctx = buffer.
+ *                    For a NULL buffer it returns an empty writer (all
+ *                    callbacks NULL) so consumers reject it with
+ *                    PG_ERR_INVALID_ARG instead of crashing.
  *
- * @note Rejects a leading draw command with PG_ERR_INVALID_ARG (paths must
- *       start with MOVE) and non-finite coordinates with PG_ERR_INVALID_ARG;
- *       on capacity exhaustion returns PG_ERR_WORKSPACE_TOO_SMALL and sets
- *       buffer->overflowed.
+ * @note A leading draw command (paths must start with MOVE) and non-finite
+ *       coordinates fail with PG_ERR_INVALID_ARG; capacity exhaustion fails
+ *       with PG_ERR_WORKSPACE_TOO_SMALL. Every failure poisons the buffer.
  */
 pg_path_writer_t pg_path_buffer_writer(pg_path_buffer_t *buffer);
 
@@ -79,10 +88,11 @@ pg_path_writer_t pg_path_buffer_writer(pg_path_buffer_t *buffer);
  *
  * @param[in]  buffer  Buffer to expose. Cannot be NULL.
  * @param[out] path    Receives a view over buffer->cmds. Cannot be NULL.
+ *                     Cleared (NULL/0) on every failure path.
  * @return             PG_OK on success;
  *                     PG_ERR_INVALID_ARG for NULL arguments;
- *                     PG_ERR_WORKSPACE_TOO_SMALL if a command was previously
- *                     rejected (the content is incomplete);
+ *                     the original failure code when the buffer was poisoned
+ *                     (e.g. PG_ERR_WORKSPACE_TOO_SMALL);
  *                     PG_ERR_INVALID_PATH if nothing was written.
  *
  * @note The view borrows buffer storage; re-initializing or reusing the

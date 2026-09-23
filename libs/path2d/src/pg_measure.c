@@ -135,7 +135,7 @@ pg_point_t pg_tangent_to_normal(pg_point_t tangent)
 }
 
 void pg_measure_locate(const pg_measure_t *measure, float distance,
-                       uint16_t *command_index, float *t)
+                       pg_locate_t *out)
 {
     const pg_measure_sample_t *samples = measure->samples;
     uint16_t lo;
@@ -144,19 +144,27 @@ void pg_measure_locate(const pg_measure_t *measure, float distance,
     float span;
     float f;
 
+    out->lo = 0;
+    out->hi = 0;
     if (measure->sample_count < PG_MEASURE_MIN_SAMPLES) {
-        *command_index = samples[0].command_index;
-        *t = samples[0].t;
+        out->command_index = samples[0].command_index;
+        out->t = samples[0].t;
         return;
     }
     if (distance <= 0.0f) {
-        *command_index = samples[0].command_index;
-        *t = samples[0].t;
+        out->command_index = samples[0].command_index;
+        out->t = samples[0].t;
+        out->lo = 0;
+        out->hi = 1;
         return;
     }
     if (distance >= measure->total_length) {
-        *command_index = samples[measure->sample_count - 1u].command_index;
-        *t = samples[measure->sample_count - 1u].t;
+        uint16_t last = (uint16_t)(measure->sample_count - 1u);
+
+        out->command_index = samples[last].command_index;
+        out->t = samples[last].t;
+        out->lo = (uint16_t)(last - 1u);
+        out->hi = last;
         return;
     }
 
@@ -175,19 +183,77 @@ void pg_measure_locate(const pg_measure_t *measure, float distance,
     f = (!(span > 0.0f)) ? 1.0f
                          : (distance - samples[lo].distance) / span;
     if (samples[lo].command_index == samples[hi].command_index) {
-        *t = samples[lo].t + (samples[hi].t - samples[lo].t) * f;
+        out->t = samples[lo].t + (samples[hi].t - samples[lo].t) * f;
     }
     else {
         /* Contour joint: the later command's local span begins at t = 0, so
          * the gap maps linearly onto [0, samples[hi].t]. */
-        *t = samples[hi].t * f;
+        out->t = samples[hi].t * f;
     }
-    *command_index = samples[hi].command_index;
+    out->command_index = samples[hi].command_index;
+    out->lo = lo;
+    out->hi = hi;
+}
+
+pg_point_t pg_sample_pos(const pg_measure_t *measure, uint16_t index)
+{
+    const pg_measure_sample_t *sample = &measure->samples[index];
+    pg_point_t p0;
+    pg_point_t end;
+    pg_cmd_t cmd;
+
+    pg_cmd_span(measure->path, sample->command_index, &p0, &end, &cmd);
+    return pg_cmd_eval(&cmd, p0, end, sample->t);
+}
+
+/**
+ * Local travel direction extracted from the LUT bracket around a query.
+ *
+ * This is the second tier of the tangent fallback: when the analytic
+ * derivative vanishes (collapsed control handle, cusp), the chord of the
+ * whole command can point in a visibly wrong direction (for
+ * M(0,0) C(0,0, 0,100, 100,100) it yields the (1,1) diagonal although the
+ * curve leaves along +y). The flat leaf the query sits in carries the true
+ * local direction, and its endpoints are exactly the bracketing samples.
+ */
+static bool pg_lut_direction(const pg_measure_t *measure, uint16_t lo,
+                             uint16_t hi, pg_point_t *direction)
+{
+    pg_point_t a;
+    pg_point_t b;
+
+    if (measure->sample_count < PG_MEASURE_MIN_SAMPLES) {
+        return false;
+    }
+    if (lo == hi) {
+        if ((uint16_t)(hi + 1u) < measure->sample_count) {
+            a = pg_sample_pos(measure, hi);
+            b = pg_sample_pos(measure, (uint16_t)(hi + 1u));
+        }
+        else if (lo > 0u) {
+            a = pg_sample_pos(measure, (uint16_t)(lo - 1u));
+            b = pg_sample_pos(measure, lo);
+        }
+        else {
+            return false;
+        }
+    }
+    else {
+        a = pg_sample_pos(measure, lo);
+        b = pg_sample_pos(measure, hi);
+    }
+    if (pg_point_dist(a, b) <= PG_EPSILON) {
+        return false;
+    }
+    direction->x = b.x - a.x;
+    direction->y = b.y - a.y;
+    *direction = pg_vec_normalize(*direction);
+    return true;
 }
 
 /* Curve-evaluated position and unit tangent for a located (cmd, t) pair. */
-static void pg_located_pos_tan(const pg_measure_t *measure, uint16_t index,
-                               float t, pg_point_t *position,
+static void pg_located_pos_tan(const pg_measure_t *measure,
+                               const pg_locate_t *loc, pg_point_t *position,
                                pg_point_t *tangent)
 {
     pg_point_t p0;
@@ -196,30 +262,38 @@ static void pg_located_pos_tan(const pg_measure_t *measure, uint16_t index,
     pg_point_t deriv;
     float norm;
 
-    pg_cmd_span(measure->path, index, &p0, &end, &cmd);
-    *position = pg_cmd_eval(&cmd, p0, end, t);
+    pg_cmd_span(measure->path, loc->command_index, &p0, &end, &cmd);
+    *position = pg_cmd_eval(&cmd, p0, end, loc->t);
     if (tangent == NULL) {
         return;
     }
-    deriv = pg_cmd_deriv(&cmd, p0, end, t);
+    deriv = pg_cmd_deriv(&cmd, p0, end, loc->t);
     norm = sqrtf(deriv.x * deriv.x + deriv.y * deriv.y);
     if (norm > PG_EPSILON) {
         tangent->x = deriv.x / norm;
         tangent->y = deriv.y / norm;
         return;
     }
-    /* Cusp or degenerate control polygon: fall back to the chord, then to
-     * (1, 0) via pg_vec_normalize(). Never NaN/Inf. */
+    /* Tier 2: direction of the adjacent measurable LUT span. */
+    if (pg_lut_direction(measure, loc->lo, loc->hi, tangent)) {
+        return;
+    }
+    /* Tier 3: whole-command chord. */
     deriv.x = end.x - p0.x;
     deriv.y = end.y - p0.y;
-    *tangent = pg_vec_normalize(deriv);
+    if (pg_point_dist(p0, end) > PG_EPSILON) {
+        *tangent = pg_vec_normalize(deriv);
+        return;
+    }
+    /* Tier 4: degenerate everything. */
+    tangent->x = 1.0f;
+    tangent->y = 0.0f;
 }
 
 pg_result_t pg_measure_get_pos_tan(const pg_measure_t *measure, float distance,
                                    pg_point_t *position, pg_point_t *tangent)
 {
-    uint16_t index;
-    float t;
+    pg_locate_t loc;
 
     if (measure == NULL || position == NULL) {
         return PG_ERR_INVALID_ARG;
@@ -241,8 +315,8 @@ pg_result_t pg_measure_get_pos_tan(const pg_measure_t *measure, float distance,
         distance = measure->total_length;
     }
 
-    pg_measure_locate(measure, distance, &index, &t);
-    pg_located_pos_tan(measure, index, t, position, tangent);
+    pg_measure_locate(measure, distance, &loc);
+    pg_located_pos_tan(measure, &loc, position, tangent);
     return PG_OK;
 }
 

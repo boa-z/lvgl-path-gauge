@@ -129,13 +129,31 @@ pg_point_t pg_cmd_deriv(const pg_cmd_t *cmd, pg_point_t p0, pg_point_t end,
                         float t);
 
 /**
- * @brief Maps an arc distance to (command index, local parameter).
+ * @brief Maps an arc distance to (command index, local parameter) plus the LUT
+ * bracket that surrounds it.
  *
  * distance is clamped to [0, total_length]. Distances at a contour joint
  * resolve to the later command with t = 0 (documented multi-subpath
- * boundary semantics). O(log N) binary search.
+ * boundary semantics). O(log N) binary search. The bracket indices can be
+ * equal only for a degenerate sample table.
  */
+typedef struct {
+    uint16_t command_index; /**< Command owning the located geometry. */
+    float t;                /**< Local parameter within that command. */
+    uint16_t lo;            /**< Lower LUT bracket index. */
+    uint16_t hi;            /**< Upper LUT bracket index (lo < hi when possible). */
+} pg_locate_t;
+
 void pg_measure_locate(const pg_measure_t *measure, float distance,
-                       uint16_t *command_index, float *t);
+                       pg_locate_t *out);
+
+/**
+ * @brief Position of the geometry at a LUT sample.
+ *
+ * Evaluates the owning command at the sample's local parameter; used by the
+ * tangent fallback to recover a local travel direction when the curve
+ * derivative degenerates.
+ */
+pg_point_t pg_sample_pos(const pg_measure_t *measure, uint16_t index);
 
 #endif /* PATH2D_INTERNAL_H */

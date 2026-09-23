@@ -9,6 +9,7 @@ add_library(path2d STATIC
 )
 target_include_directories(path2d PUBLIC include)
 target_link_libraries(path2d PRIVATE path2d_dev_flags)
+add_library(path2d::path2d ALIAS path2d)
 if(NOT MSVC)
     target_link_libraries(path2d PUBLIC m)
 endif()

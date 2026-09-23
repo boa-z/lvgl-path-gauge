@@ -108,13 +108,10 @@ static pg_result_t pg_emit_piece(const pg_path_t *path, uint16_t index,
 pg_result_t pg_measure_slice(const pg_measure_t *measure, float start,
                              float end, const pg_path_writer_t *writer)
 {
-    uint16_t first_cmd;
-    uint16_t last_cmd;
-    float first_t;
-    float last_t;
+    pg_locate_t first;
+    pg_locate_t last;
     uint16_t index;
-    bool have_previous = false;
-    pg_point_t previous_end = { 0.0f, 0.0f };
+    bool pending_move = false;
     pg_result_t res;
 
     if (measure == NULL || writer == NULL) {
@@ -144,17 +141,17 @@ pg_result_t pg_measure_slice(const pg_measure_t *measure, float start,
         end = measure->total_length;
     }
 
-    pg_measure_locate(measure, start, &first_cmd, &first_t);
-    pg_measure_locate(measure, end, &last_cmd, &last_t);
+    pg_measure_locate(measure, start, &first);
+    pg_measure_locate(measure, end, &last);
 
     {
         pg_point_t p0;
         pg_point_t cmd_end;
         pg_cmd_t cmd;
 
-        pg_cmd_span(measure->path, first_cmd, &p0, &cmd_end, &cmd);
+        pg_cmd_span(measure->path, first.command_index, &p0, &cmd_end, &cmd);
         res = writer->move_to(writer->ctx,
-                              pg_cmd_eval(&cmd, p0, cmd_end, first_t));
+                              pg_cmd_eval(&cmd, p0, cmd_end, first.t));
         if (res != PG_OK) {
             return res;
         }
@@ -163,7 +160,7 @@ pg_result_t pg_measure_slice(const pg_measure_t *measure, float start,
         return PG_OK; /* zero-length slice: a single MOVE */
     }
 
-    for (index = first_cmd;; index++) {
+    for (index = first.command_index;; index++) {
         float t0;
         float t1;
         pg_point_t p0;
@@ -172,33 +169,31 @@ pg_result_t pg_measure_slice(const pg_measure_t *measure, float start,
         pg_point_t piece_start;
 
         if (measure->path->cmds[index].type == PG_CMD_MOVE) {
-            /* MOVEs carry no geometry and never own LUT samples; the subpath
-             * break is detected from the position jump of the next command. */
-            if (index == last_cmd) {
-                break;
+            /* Contour boundaries come from the original MOVE commands, never
+             * from position comparison: M(0,0) L(10,0) M(10,0) L(20,0) has a
+             * same-coordinate break that still starts a new contour. */
+            pending_move = true;
+            if (index == last.command_index) {
+                break; /* unreachable: MOVEs never own LUT samples */
             }
             continue;
         }
-        t0 = (index == first_cmd) ? first_t : 0.0f;
-        t1 = (index == last_cmd) ? last_t : 1.0f;
+        t0 = (index == first.command_index) ? first.t : 0.0f;
+        t1 = (index == last.command_index) ? last.t : 1.0f;
         pg_cmd_span(measure->path, index, &p0, &cmd_end, &cmd);
         piece_start = pg_cmd_eval(&cmd, p0, cmd_end, t0);
-        if (have_previous &&
-            pg_point_dist(previous_end, piece_start) > PG_EPSILON) {
-            /* Multi-subpath break: the next subpath starts elsewhere, so the
-             * writer must open a new contour instead of drawing a jump. */
+        if (pending_move) {
             res = writer->move_to(writer->ctx, piece_start);
             if (res != PG_OK) {
                 return res;
             }
+            pending_move = false;
         }
-        have_previous = true;
         res = pg_emit_piece(measure->path, index, t0, t1, writer);
         if (res != PG_OK) {
             return res;
         }
-        previous_end = pg_cmd_eval(&cmd, p0, cmd_end, t1);
-        if (index == last_cmd) {
+        if (index == last.command_index) {
             break;
         }
     }

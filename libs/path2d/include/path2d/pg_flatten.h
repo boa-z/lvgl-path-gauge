@@ -1,6 +1,6 @@
 /**
  * @file pg_flatten.h
- * @brief Adaptive subdivision flattening of paths into polylines.
+ * @brief Adaptive subdivision flattening into move_to/line_to writer calls.
  *
  * Copyright (c) 2026 boa-z
  * SPDX-License-Identifier: MIT
@@ -9,48 +9,44 @@
 #define PATH2D_FLATTEN_H
 
 #include "path2d/pg_types.h"
+#include "path2d/pg_writer.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * @brief Receives every emitted flatten vertex.
+ * @brief Flattens a path into a move_to/line_to writer stream.
  *
- * Each subpath start is emitted once, followed by its segment endpoints
- * (curves adaptively subdivided). CLOSE emits the subpath start again.
- * Runs synchronously inside pg_path_flatten(); must not retain the point.
+ * Uses the shared subdivision engine also used by pg_measure_init(): a span
+ * is accepted only when (a) no control point deviates more than `tolerance`
+ * from the chord AND (b) the control-polygon length exceeds the chord by no
+ * more than `tolerance`. The second condition forces subdivision of collinear
+ * overshoot/backtracking curves (e.g. M(0,0) Q(100,0) (10,0)), which the
+ * perpendicular test alone would flatten into a single wrong chord. Monotone
+ * collinear spans still emit one chord. Truly degenerate leaves (zero chord
+ * after subdivision) emit nothing.
  *
- * @param[in] ctx    Caller context passed through from pg_path_flatten().
- * @param[in] point  Emitted vertex in path coordinate units.
- */
-typedef void (*pg_flatten_cb)(void *ctx, pg_point_t point);
-
-/**
- * @brief Flattens a path into a vertex stream (adaptive subdivision).
- *
- * Uses the shared subdivision engine also used by pg_measure_init():
- * a span is accepted only when (a) no control point deviates more than
- * `tolerance` from the chord AND (b) the control-polygon length exceeds the
- * chord by no more than `tolerance`. The second condition is what forces
- * subdivision of collinear overshoot/backtracking curves (e.g.
- * M(0,0) Q(100,0) (10,0)), which the perpendicular test alone would flatten
- * into a single wrong chord. Monotone collinear spans still emit one chord.
- * Truly degenerate leaves (zero chord after subdivision) emit nothing.
+ * Output contract: one move_to per MOVE command (so contour boundaries
+ * survive into the sink) followed by one line_to per flat leaf. quad_to and
+ * cubic_to are never called; renderers must not consume a bare point stream
+ * because it cannot express contour breaks.
  *
  * @param[in] path       Path to flatten (validated, finite coordinates).
  * @param[in] tolerance  Flatness tolerance in path coordinate units;
  *                       values below PG_MIN_TOLERANCE are clamped up.
- * @param[in] cb         Vertex sink. Cannot be NULL.
- * @param[in] ctx        Opaque pointer forwarded to every cb call.
- * @return               PG_OK on success, PG_ERR_INVALID_ARG for NULL
- *                       path/callback or non-positive tolerance,
- *                       PG_ERR_INVALID_PATH for malformed paths.
+ * @param[in] writer     Sink requiring non-NULL move_to and line_to.
+ *                       Sink errors abort the walk immediately and are
+ *                       propagated (e.g. PG_ERR_WORKSPACE_TOO_SMALL).
+ * @return               PG_OK on success; PG_ERR_INVALID_ARG for NULL
+ *                       path/writer/missing callbacks or non-positive
+ *                       tolerance; PG_ERR_INVALID_PATH for malformed paths;
+ *                       otherwise the first error from the sink.
  *
- * @note No heap is used; the callback runs synchronously.
+ * @note No heap is used; the writer callbacks run synchronously.
  */
 pg_result_t pg_path_flatten(const pg_path_t *path, float tolerance,
-                            pg_flatten_cb cb, void *ctx);
+                            const pg_path_writer_t *writer);
 
 #ifdef __cplusplus
 }

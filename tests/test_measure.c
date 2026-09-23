@@ -244,6 +244,19 @@ int main(void)
         PG_MOVE_TO(0.0f, 0.0f),
         PG_CUBIC_TO(100.0f, 0.0f, -50.0f, 0.0f, 50.0f, 0.0f),
     };
+    /* Collapsed start handle: the analytic derivative at t = 0 is exactly
+     * zero, so the tangent must come from the local LUT span direction
+     * (the curve leaves along +y), not from the (1,1) command chord. */
+    static const pg_cmd_t degenerate_start_handle[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_CUBIC_TO(0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 100.0f),
+    };
+    /* Collapsed end handle: arrival direction is +x, while the command chord
+     * would report the diagonal. */
+    static const pg_cmd_t degenerate_end_handle[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_CUBIC_TO(0.0f, 100.0f, 100.0f, 100.0f, 100.0f, 100.0f),
+    };
     pg_cmd_t nan_cmds[2] = { PG_MOVE_TO(0.0f, 0.0f),
                              PG_LINE_TO(10.0f, 0.0f) };
     pg_path_t line = { line_cmds, PG_ARRAY_SIZE(line_cmds) };
@@ -265,6 +278,10 @@ int main(void)
     pg_path_t backtrack_q = { backtrack_quad, PG_ARRAY_SIZE(backtrack_quad) };
     pg_path_t backtrack_c = { backtrack_cubic,
                               PG_ARRAY_SIZE(backtrack_cubic) };
+    pg_path_t deg_start = { degenerate_start_handle,
+                            PG_ARRAY_SIZE(degenerate_start_handle) };
+    pg_path_t deg_end = { degenerate_end_handle,
+                          PG_ARRAY_SIZE(degenerate_end_handle) };
     pg_path_t empty = { line_cmds, 0 };
     pg_path_t nan_path = { nan_cmds, PG_ARRAY_SIZE(nan_cmds) };
     pg_measure_t m;
@@ -419,6 +436,36 @@ int main(void)
     TU_EXPECT(pg_measure_get_pos_tan(&m, total, &pos, &tan) == PG_OK);
     TU_POINT_NEAR(pos, 50.0f, 0.0f, 0.05f);
     TU_POINT_NEAR(tan, 1.0f, 0.0f, 1e-3f);
+
+    /* Degenerate (collapsed) control handles: the analytic derivative is zero
+     * at the endpoint, so the tangent must come from the adjacent measurable
+     * LUT span. Assuming the command chord here yields visibly wrong
+     * directions ((1,1) diagonal in both cases). */
+    TU_EXPECT(pg_measure_init(&m, &deg_start, g_ws, WS_BIG, 0.25f) == PG_OK);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 0.0f, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 0.0f, 0.0f, 1e-5f);
+    TU_EXPECT(tan.y > 0.99f && fabsf(tan.x) < 0.05f);
+    /* Explicitly not the (1,1) command-chord diagonal. */
+    TU_EXPECT((tan.x + tan.y) * 0.7071068f < 0.9f);
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, 0.0f, &pos, &tan) == PG_OK);
+    TU_EXPECT(tan.y > 0.99f);
+
+    TU_EXPECT(pg_measure_init(&m, &deg_end, g_ws, WS_BIG, 0.25f) == PG_OK);
+    total = pg_measure_get_length(&m);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, total, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 100.0f, 100.0f, 0.05f);
+    TU_EXPECT(tan.x > 0.99f && fabsf(tan.y) < 0.05f);
+    /* Explicitly not the (1,1) command-chord diagonal. */
+    TU_EXPECT((tan.x + tan.y) * 0.7071068f < 0.9f);
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, 1.0f, &pos, &tan) == PG_OK);
+    TU_EXPECT(tan.x > 0.99f);
+    /* A mid-curve query on the same path still uses the analytic derivative. */
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, 0.5f, &pos, &tan) == PG_OK);
+    {
+        float norm = sqrtf(tan.x * tan.x + tan.y * tan.y);
+
+        TU_NEAR(norm, 1.0f, 1e-4f);
+    }
 
     /* Degenerate inputs: no crash, no NaN/Inf, explicit codes. */
     TU_EXPECT(pg_measure_init(&m, &zero, g_ws, WS_BIG, 0.5f) ==

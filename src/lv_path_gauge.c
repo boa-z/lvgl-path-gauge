@@ -1,6 +1,6 @@
 /**
  * @file lv_path_gauge.c
- * @brief LVGL 9.1 arbitrary-path gauge: static track + single-colour progress.
+ * @brief LVGL 9.1 arbitrary-path gauge: track, progress and value zones.
  *
  * Copyright (c) 2026 boa-z
  * SPDX-License-Identifier: MIT
@@ -10,8 +10,11 @@
  * lv_obj_init_draw_line_dsc() -> lv_draw_line(). Only public LVGL API is
  * used. LV_PART_MAIN styles the track, LV_PART_INDICATOR the active progress.
  *
- * v1 scope: one open contour (single MOVE, no CLOSE), no scaling, no zones,
- * no ticks, no needle. Value changes only clamp, store and invalidate.
+ * Progress is a pure cache slice: the flattened polyline and its cumulative
+ * distances are built once by set_path() and only clipped per frame. Optional
+ * value-domain zones partition the active run into coloured sub-runs without
+ * creating objects or rebuilding geometry. Rounded caps are applied only at
+ * the outer start and the true end of the whole active run.
  */
 #include "lv_path_gauge_private.h"
 
@@ -21,11 +24,21 @@
 
 #define MY_CLASS (&lv_path_gauge_class)
 
+/** Render-cache writer context: writes through the gauge's borrowed arrays. */
 typedef struct {
-    lv_path_gauge_workspace_t *workspace; /**< Cache being filled. */
-    pg_point_t cursor;                    /**< Last emitted point. */
-    float distance;                       /**< Running polyline length. */
+    lv_path_gauge_t *gauge; /**< Gauge whose cache is being filled. */
+    uint16_t capacity;      /**< Caller vertex capacity. */
+    pg_point_t cursor;      /**< Last emitted point. */
+    float distance;         /**< Running polyline length. */
 } gauge_cache_t;
+
+/** Caps and colour override for one contiguous progress sub-run. */
+typedef struct {
+    bool round_start;    /**< Apply the rounded style at the sub-run start. */
+    bool round_end;      /**< Apply the rounded style at the sub-run end. */
+    bool override_color; /**< Use @ref color instead of the part style. */
+    lv_color_t color;    /**< Zone colour when @ref override_color is set. */
+} gauge_run_style_t;
 
 /* --- small helpers --------------------------------------------------------- */
 
@@ -52,19 +65,46 @@ static float gauge_point_distance(pg_point_t a, pg_point_t b)
     return sqrtf(dx * dx + dy * dy);
 }
 
+/**
+ * Maps a value into [0, 1] with int64 intermediates.
+ *
+ * The int64 span keeps extreme int32 ranges from overflowing; the only
+ * division is a float one, so the per-frame draw path stays free of double
+ * arithmetic.
+ */
+static float gauge_value_fraction(const lv_path_gauge_t *gauge, int32_t value)
+{
+    int64_t span;
+    int64_t offset;
+
+    if (gauge->max_value <= gauge->min_value) {
+        return 0.0f;
+    }
+    span = (int64_t)gauge->max_value - (int64_t)gauge->min_value;
+    offset = (int64_t)value - (int64_t)gauge->min_value;
+    return (float)offset / (float)span;
+}
+
+/** Distance of a value along the cached polyline. */
+static float gauge_value_to_distance(const lv_path_gauge_t *gauge, int32_t value)
+{
+    return gauge_value_fraction(gauge, value) * gauge->total_distance;
+}
+
 /* --- render cache builder (pg_path_writer_t sink) -------------------------- */
 
 static pg_result_t gauge_cache_move(void *ctx, pg_point_t to)
 {
     gauge_cache_t *cache = ctx;
+    lv_path_gauge_t *gauge = cache->gauge;
 
-    if (cache->workspace->vertex_count >= LV_PATH_GAUGE_MAX_VERTICES) {
+    if (gauge->vertex_count >= cache->capacity) {
         return PG_ERR_WORKSPACE_TOO_SMALL;
     }
     /* A MOVE only moves the cursor: it starts a contour and adds no length. */
-    cache->workspace->vertices[cache->workspace->vertex_count] = to;
-    cache->workspace->distances[cache->workspace->vertex_count] = cache->distance;
-    cache->workspace->vertex_count++;
+    gauge->vertices[gauge->vertex_count] = to;
+    gauge->distances[gauge->vertex_count] = cache->distance;
+    gauge->vertex_count++;
     cache->cursor = to;
     return PG_OK;
 }
@@ -72,14 +112,15 @@ static pg_result_t gauge_cache_move(void *ctx, pg_point_t to)
 static pg_result_t gauge_cache_line(void *ctx, pg_point_t to)
 {
     gauge_cache_t *cache = ctx;
+    lv_path_gauge_t *gauge = cache->gauge;
 
-    if (cache->workspace->vertex_count >= LV_PATH_GAUGE_MAX_VERTICES) {
+    if (gauge->vertex_count >= cache->capacity) {
         return PG_ERR_WORKSPACE_TOO_SMALL;
     }
     cache->distance += gauge_point_distance(cache->cursor, to);
-    cache->workspace->vertices[cache->workspace->vertex_count] = to;
-    cache->workspace->distances[cache->workspace->vertex_count] = cache->distance;
-    cache->workspace->vertex_count++;
+    gauge->vertices[gauge->vertex_count] = to;
+    gauge->distances[gauge->vertex_count] = cache->distance;
+    gauge->vertex_count++;
     cache->cursor = to;
     return PG_OK;
 }
@@ -96,73 +137,57 @@ static inline const lv_path_gauge_t *gauge_from_const_obj(const lv_obj_t *obj)
     return (const lv_path_gauge_t *)obj;
 }
 
-void lv_path_gauge_workspace_init(lv_path_gauge_workspace_t *workspace,
-                                  float tolerance)
+pg_result_t lv_path_gauge_workspace_init(lv_path_gauge_workspace_t *workspace,
+                                         pg_measure_sample_t *samples,
+                                         uint16_t samples_capacity,
+                                         pg_point_t *vertices, float *distances,
+                                         uint16_t vertices_capacity,
+                                         float tolerance)
 {
     if (workspace == NULL) {
-        return;
+        return PG_ERR_INVALID_ARG;
     }
+    /* Fail-atomic: a rejected init leaves an unusable, zeroed descriptor. */
     *workspace = (lv_path_gauge_workspace_t){ 0 };
+    if (samples == NULL || vertices == NULL || distances == NULL) {
+        return PG_ERR_INVALID_ARG;
+    }
+    if (samples_capacity < PG_MEASURE_MIN_SAMPLES ||
+        vertices_capacity < LV_PATH_GAUGE_MIN_VERTICES) {
+        return PG_ERR_WORKSPACE_TOO_SMALL;
+    }
+    /* Non-finite tolerance is a caller error everywhere in the API. */
+    if (!isfinite(tolerance)) {
+        return PG_ERR_INVALID_ARG;
+    }
+    workspace->samples = samples;
+    workspace->samples_capacity = samples_capacity;
+    workspace->vertices = vertices;
+    workspace->distances = distances;
+    workspace->vertices_capacity = vertices_capacity;
     workspace->tolerance =
         (tolerance > 0.0f) ? tolerance : LV_PATH_GAUGE_DEFAULT_TOLERANCE;
+    return PG_OK;
 }
 
 float lv_path_gauge_get_value_fraction(const lv_obj_t *obj)
 {
     const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
-    int64_t span;
-    int64_t offset;
 
-    if (gauge == NULL || gauge->max_value <= gauge->min_value) {
+    if (gauge == NULL) {
         return 0.0f;
     }
-    /* int64 arithmetic keeps extreme int32 ranges from overflowing. */
-    span = (int64_t)gauge->max_value - (int64_t)gauge->min_value;
-    offset = (int64_t)gauge->value - (int64_t)gauge->min_value;
-    return (float)((double)offset / (double)span);
-}
-
-uint16_t lv_path_gauge_get_vertex_count(const lv_obj_t *obj)
-{
-    const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
-
-    if (gauge == NULL || gauge->workspace == NULL) {
-        return 0;
-    }
-    return gauge->workspace->vertex_count;
+    return gauge_value_fraction(gauge, gauge->value);
 }
 
 float lv_path_gauge_get_total_distance(const lv_obj_t *obj)
 {
     const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
 
-    if (gauge == NULL || gauge->workspace == NULL) {
+    if (gauge == NULL) {
         return 0.0f;
     }
-    return gauge->workspace->total_distance;
-}
-
-pg_point_t lv_path_gauge_get_vertex_point(const lv_obj_t *obj, uint16_t index)
-{
-    const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
-    pg_point_t zero = { 0.0f, 0.0f };
-
-    if (gauge == NULL || gauge->workspace == NULL ||
-        index >= gauge->workspace->vertex_count) {
-        return zero;
-    }
-    return gauge->workspace->vertices[index];
-}
-
-float lv_path_gauge_get_vertex_distance(const lv_obj_t *obj, uint16_t index)
-{
-    const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
-
-    if (gauge == NULL || gauge->workspace == NULL ||
-        index >= gauge->workspace->vertex_count) {
-        return 0.0f;
-    }
-    return gauge->workspace->distances[index];
+    return gauge->total_distance;
 }
 
 int32_t lv_path_gauge_get_value(const lv_obj_t *obj)
@@ -240,6 +265,56 @@ pg_result_t lv_path_gauge_set_range(lv_obj_t *obj, int32_t min, int32_t max)
     return PG_OK;
 }
 
+/* --- zones ----------------------------------------------------------------- */
+
+pg_result_t lv_path_gauge_set_zones(lv_obj_t *obj,
+                                    const lv_path_gauge_zone_t *zones,
+                                    uint16_t count)
+{
+    lv_path_gauge_t *gauge = gauge_from_obj(obj);
+    uint16_t i;
+
+    if (gauge == NULL) {
+        return PG_ERR_INVALID_ARG;
+    }
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    if (count > LV_PATH_GAUGE_MAX_ZONES) {
+        return PG_ERR_WORKSPACE_TOO_SMALL;
+    }
+    if (count > 0u && zones == NULL) {
+        return PG_ERR_INVALID_ARG;
+    }
+    /* Validate everything before touching state: set_zones() is atomic. */
+    for (i = 0; i < count; i++) {
+        if (zones[i].start >= zones[i].end) {
+            return PG_ERR_INVALID_ARG;
+        }
+        if (i > 0u && zones[i].start < zones[i - 1u].end) {
+            /* Unsorted or overlapping; adjacent zones are allowed. */
+            return PG_ERR_INVALID_ARG;
+        }
+    }
+    gauge->zone_count = count;
+    for (i = 0; i < count; i++) {
+        gauge->zones[i] = zones[i];
+    }
+    lv_obj_invalidate(obj);
+    return PG_OK;
+}
+
+pg_result_t lv_path_gauge_clear_zones(lv_obj_t *obj)
+{
+    lv_path_gauge_t *gauge = gauge_from_obj(obj);
+
+    if (gauge == NULL) {
+        return PG_ERR_INVALID_ARG;
+    }
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    gauge->zone_count = 0u;
+    lv_obj_invalidate(obj);
+    return PG_OK;
+}
+
 /* --- path installation ----------------------------------------------------- */
 
 /* Clears path/cache state so a failed set_path() never leaves stale geometry. */
@@ -248,14 +323,25 @@ static void gauge_clear_path(lv_obj_t *obj)
     lv_path_gauge_t *gauge = gauge_from_obj(obj);
 
     gauge->path = NULL;
-    if (gauge->workspace != NULL) {
-        gauge->workspace->vertex_count = 0;
-        gauge->workspace->total_distance = 0.0f;
-        gauge->workspace->measure = (pg_measure_t){ 0 };
-    }
-    gauge->workspace = NULL;
+    gauge->vertices = NULL;
+    gauge->distances = NULL;
+    gauge->vertex_count = 0u;
+    gauge->total_distance = 0.0f;
+    gauge->measure = (pg_measure_t){ 0 };
     lv_obj_refresh_self_size(obj);
     lv_obj_invalidate(obj);
+}
+
+pg_result_t lv_path_gauge_clear_path(lv_obj_t *obj)
+{
+    lv_path_gauge_t *gauge = gauge_from_obj(obj);
+
+    if (gauge == NULL) {
+        return PG_ERR_INVALID_ARG;
+    }
+    LV_ASSERT_OBJ(obj, MY_CLASS);
+    gauge_clear_path(obj);
+    return PG_OK;
 }
 
 pg_result_t lv_path_gauge_set_path(lv_obj_t *obj, const pg_path_t *path,
@@ -266,17 +352,38 @@ pg_result_t lv_path_gauge_set_path(lv_obj_t *obj, const pg_path_t *path,
     pg_path_writer_t writer = { gauge_cache_move, gauge_cache_line, NULL, NULL,
                                 &cache };
     pg_result_t res;
+    float tolerance;
     uint16_t i;
     uint16_t moves = 0;
     uint16_t closes = 0;
 
-    if (gauge == NULL || workspace == NULL) {
+    if (gauge == NULL) {
         return PG_ERR_INVALID_ARG;
     }
     LV_ASSERT_OBJ(obj, MY_CLASS);
-    if (path == NULL) {
+    if (path == NULL || workspace == NULL) {
+        /* Caller error: fail-atomic like every other failure. */
         gauge_clear_path(obj);
-        return PG_OK;
+        return PG_ERR_INVALID_ARG;
+    }
+
+    if (workspace->samples == NULL || workspace->vertices == NULL ||
+        workspace->distances == NULL) {
+        gauge_clear_path(obj);
+        return PG_ERR_INVALID_ARG;
+    }
+    if (workspace->samples_capacity < PG_MEASURE_MIN_SAMPLES ||
+        workspace->vertices_capacity < LV_PATH_GAUGE_MIN_VERTICES) {
+        gauge_clear_path(obj);
+        return PG_ERR_WORKSPACE_TOO_SMALL;
+    }
+    tolerance = workspace->tolerance;
+    if (!isfinite(tolerance)) {
+        gauge_clear_path(obj);
+        return PG_ERR_INVALID_ARG;
+    }
+    if (!(tolerance > 0.0f)) {
+        tolerance = LV_PATH_GAUGE_DEFAULT_TOLERANCE;
     }
 
     res = pg_path_validate(path);
@@ -298,35 +405,33 @@ pg_result_t lv_path_gauge_set_path(lv_obj_t *obj, const pg_path_t *path,
         return PG_ERR_INVALID_PATH;
     }
 
-    if (!(workspace->tolerance > 0.0f)) {
-        workspace->tolerance = LV_PATH_GAUGE_DEFAULT_TOLERANCE;
-    }
-    workspace->vertex_count = 0;
-    workspace->total_distance = 0.0f;
-
-    res = pg_measure_init(&workspace->measure, path, workspace->samples,
-                          LV_PATH_GAUGE_MAX_SAMPLES, workspace->tolerance);
+    res = pg_measure_init(&gauge->measure, path, workspace->samples,
+                          workspace->samples_capacity, tolerance);
     if (res != PG_OK) {
         gauge_clear_path(obj);
         return res;
     }
 
-    cache.workspace = workspace;
+    gauge->vertices = workspace->vertices;
+    gauge->distances = workspace->distances;
+    gauge->vertex_count = 0u;
+    gauge->total_distance = 0.0f;
+    cache.gauge = gauge;
+    cache.capacity = workspace->vertices_capacity;
     cache.cursor = (pg_point_t){ 0.0f, 0.0f };
     cache.distance = 0.0f;
-    res = pg_path_flatten(path, workspace->tolerance, &writer);
+    res = pg_path_flatten(path, tolerance, &writer);
     if (res != PG_OK) {
         gauge_clear_path(obj);
         return res;
     }
-    if (workspace->vertex_count < 2u) {
+    if (gauge->vertex_count < 2u) {
         gauge_clear_path(obj);
         return PG_ERR_DEGENERATE;
     }
-    workspace->total_distance = cache.distance;
+    gauge->total_distance = cache.distance;
 
     gauge->path = path;
-    gauge->workspace = workspace;
     lv_obj_refresh_self_size(obj);
     lv_obj_invalidate(obj);
     return PG_OK;
@@ -337,32 +442,38 @@ pg_result_t lv_path_gauge_set_path(lv_obj_t *obj, const pg_path_t *path,
 /**
  * Draws the cached polyline clipped to the distance window [from, to].
  *
- * Progress is a pure cache slice: segments are interpolated by their stored
- * cumulative distances, so no measure/slice/flatten work happens per frame.
+ * Sub-ranges are interpolated by their stored cumulative distances, so no
+ * measure/slice/flatten work happens per frame. Within one run, rounded caps
+ * are applied only at the first and last emitted segment; the joints in
+ * between stay flat so adjacent runs (zone boundaries) never show caps.
  */
-static void gauge_draw_range(lv_layer_t *layer, lv_obj_t *obj,
-                             const lv_path_gauge_workspace_t *workspace,
-                             uint32_t part, float from, float to, int32_t x_ofs,
-                             int32_t y_ofs)
+static void gauge_draw_run(lv_layer_t *layer, lv_obj_t *obj,
+                           const lv_path_gauge_t *gauge, uint32_t part, float from,
+                           float to, int32_t x_ofs, int32_t y_ofs,
+                           const gauge_run_style_t *style)
 {
     lv_draw_line_dsc_t dsc;
-    bool started = false;
+    pg_point_t pending_a = { 0.0f, 0.0f };
+    pg_point_t pending_b = { 0.0f, 0.0f };
+    bool have_pending = false;
+    bool flushed_any = false;
     uint16_t i;
 
-    if (workspace == NULL || workspace->vertex_count < 2u || !(to > from)) {
+    if (gauge->vertex_count < 2u || !(to > from)) {
         return;
     }
     lv_draw_line_dsc_init(&dsc);
     lv_obj_init_draw_line_dsc(obj, part, &dsc);
+    if (style->override_color) {
+        dsc.color = style->color;
+    }
 
-    for (i = 0; i + 1u < workspace->vertex_count; i++) {
-        float d0 = workspace->distances[i];
-        float d1 = workspace->distances[i + 1u];
+    for (i = 0; i + 1u < gauge->vertex_count; i++) {
+        float d0 = gauge->distances[i];
+        float d1 = gauge->distances[i + 1u];
         float span = d1 - d0;
         float t0;
         float t1;
-        pg_point_t a;
-        pg_point_t b;
 
         if (!(span > 0.0f) || d1 <= from || d0 >= to) {
             continue;
@@ -378,20 +489,84 @@ static void gauge_draw_range(lv_layer_t *layer, lv_obj_t *obj,
         if (!(t1 > t0)) {
             continue;
         }
-        a = gauge_lerp(workspace->vertices[i], workspace->vertices[i + 1u], t0);
-        b = gauge_lerp(workspace->vertices[i], workspace->vertices[i + 1u], t1);
-
-        dsc.p1.x = gauge_coord(a.x) + x_ofs;
-        dsc.p1.y = gauge_coord(a.y) + y_ofs;
-        dsc.p2.x = gauge_coord(b.x) + x_ofs;
-        dsc.p2.y = gauge_coord(b.y) + y_ofs;
-        if (started) {
-            /* Round caps only on the outer ends of the drawn run, like
-             * lv_line does, so joins stay continuous. */
+        if (have_pending) {
+            /* Flush the previous segment with butt caps: joins stay continuous. */
             dsc.round_start = 0;
+            dsc.round_end = 0;
+            dsc.p1.x = gauge_coord(pending_a.x) + x_ofs;
+            dsc.p1.y = gauge_coord(pending_a.y) + y_ofs;
+            dsc.p2.x = gauge_coord(pending_b.x) + x_ofs;
+            dsc.p2.y = gauge_coord(pending_b.y) + y_ofs;
+            lv_draw_line(layer, &dsc);
+            flushed_any = true;
         }
+        pending_a = gauge_lerp(gauge->vertices[i], gauge->vertices[i + 1u], t0);
+        pending_b = gauge_lerp(gauge->vertices[i], gauge->vertices[i + 1u], t1);
+        have_pending = true;
+    }
+    if (have_pending) {
+        /* Only the outer ends of the whole run carry the rounded style. */
+        dsc.round_start = (style->round_start && !flushed_any) ? 1 : 0;
+        dsc.round_end = style->round_end ? 1 : 0;
+        dsc.p1.x = gauge_coord(pending_a.x) + x_ofs;
+        dsc.p1.y = gauge_coord(pending_a.y) + y_ofs;
+        dsc.p2.x = gauge_coord(pending_b.x) + x_ofs;
+        dsc.p2.y = gauge_coord(pending_b.y) + y_ofs;
         lv_draw_line(layer, &dsc);
-        started = true;
+    }
+}
+
+/**
+ * Partitions [min_value, value] into base/zone sub-runs and draws them.
+ *
+ * Zones are half-open [start, end) in the value domain and are clipped to the
+ * active window at draw time; the stored configuration is never modified.
+ * Gaps fall back to the LV_PART_INDICATOR base colour. The rounded indicator
+ * style applies only to the outer start and the true end of the whole active
+ * run, so internal zone boundaries stay flat.
+ */
+static void gauge_draw_zones(lv_layer_t *layer, lv_obj_t *obj,
+                             const lv_path_gauge_t *gauge, int32_t x_ofs,
+                             int32_t y_ofs, bool rounded)
+{
+    int32_t v_hi = gauge->value;
+    int32_t v_cursor = gauge->min_value;
+    bool first = true;
+    uint16_t z;
+
+    for (z = 0; z < gauge->zone_count; z++) {
+        int32_t zs = LV_MAX(gauge->zones[z].start, gauge->min_value);
+        int32_t ze = LV_MIN(gauge->zones[z].end, v_hi);
+        gauge_run_style_t style;
+
+        if (ze <= zs) {
+            continue; /* no intersection with the active window */
+        }
+        if (zs > v_cursor) {
+            /* Gap: the base indicator colour, never a rounded cap. */
+            style = (gauge_run_style_t){ rounded && first, false, false,
+                                         lv_color_black() };
+            gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
+                           gauge_value_to_distance(gauge, v_cursor),
+                           gauge_value_to_distance(gauge, zs), x_ofs, y_ofs, &style);
+            first = false;
+        }
+        /* ze >= v_hi means this run carries the true end of the progress. */
+        style = (gauge_run_style_t){ rounded && first, rounded && (ze >= v_hi), true,
+                                     gauge->zones[z].color };
+        gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
+                       gauge_value_to_distance(gauge, zs),
+                       gauge_value_to_distance(gauge, ze), x_ofs, y_ofs, &style);
+        first = false;
+        v_cursor = ze;
+    }
+    if (v_cursor < v_hi) {
+        gauge_run_style_t style = { rounded && first, rounded, false,
+                                    lv_color_black() };
+
+        gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
+                       gauge_value_to_distance(gauge, v_cursor),
+                       gauge_value_to_distance(gauge, v_hi), x_ofs, y_ofs, &style);
     }
 }
 
@@ -405,16 +580,16 @@ static int32_t gauge_ext_draw_size(const lv_obj_t *obj,
     /* Half a stroke on both sides plus one pixel of antialiasing slack. */
     int32_t extra = width / 2 + 2;
 
-    if (gauge->workspace != NULL) {
+    if (gauge->vertices != NULL) {
         int32_t obj_w = lv_obj_get_width(obj);
         int32_t obj_h = lv_obj_get_height(obj);
         uint16_t i;
 
         /* A caller may size the object smaller than its path; make sure the
          * stroke is not clipped by the object's invalid area. */
-        for (i = 0; i < gauge->workspace->vertex_count; i++) {
-            int32_t x = (int32_t)gauge_coord(gauge->workspace->vertices[i].x);
-            int32_t y = (int32_t)gauge_coord(gauge->workspace->vertices[i].y);
+        for (i = 0; i < gauge->vertex_count; i++) {
+            int32_t x = (int32_t)gauge_coord(gauge->vertices[i].x);
+            int32_t y = (int32_t)gauge_coord(gauge->vertices[i].y);
 
             if (x < 0) {
                 extra = LV_MAX(extra, -x + width);
@@ -442,12 +617,14 @@ static void gauge_draw_event(lv_event_t *e, lv_obj_t *obj,
     int32_t y_ofs;
     float total;
     float active;
+    gauge_run_style_t style;
+    bool rounded_main;
+    bool rounded_indicator;
 
-    if (gauge->path == NULL || gauge->workspace == NULL ||
-        gauge->workspace->vertex_count < 2u) {
+    if (gauge->path == NULL || gauge->vertex_count < 2u) {
         return;
     }
-    total = gauge->workspace->total_distance;
+    total = gauge->total_distance;
     if (!(total > 0.0f)) {
         return;
     }
@@ -455,14 +632,25 @@ static void gauge_draw_event(lv_event_t *e, lv_obj_t *obj,
     x_ofs = area.x1 - lv_obj_get_scroll_x(obj);
     y_ofs = area.y1 - lv_obj_get_scroll_y(obj);
 
-    gauge_draw_range(layer, obj, gauge->workspace, LV_PART_MAIN, 0.0f, total,
-                     x_ofs, y_ofs);
+    rounded_main = lv_obj_get_style_line_rounded(obj, LV_PART_MAIN) != 0;
+    style = (gauge_run_style_t){ rounded_main, rounded_main, false,
+                                 lv_color_black() };
+    gauge_draw_run(layer, obj, gauge, LV_PART_MAIN, 0.0f, total, x_ofs, y_ofs,
+                   &style);
 
-    active = lv_path_gauge_get_value_fraction(obj) * total;
-    if (active > 0.0f) {
-        gauge_draw_range(layer, obj, gauge->workspace, LV_PART_INDICATOR, 0.0f,
-                         active, x_ofs, y_ofs);
+    active = gauge_value_fraction(gauge, gauge->value) * total;
+    if (!(active > 0.0f)) {
+        return;
     }
+    rounded_indicator = lv_obj_get_style_line_rounded(obj, LV_PART_INDICATOR) != 0;
+    if (gauge->zone_count == 0u) {
+        style = (gauge_run_style_t){ rounded_indicator, rounded_indicator, false,
+                                     lv_color_black() };
+        gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR, 0.0f, active, x_ofs,
+                       y_ofs, &style);
+        return;
+    }
+    gauge_draw_zones(layer, obj, gauge, x_ofs, y_ofs, rounded_indicator);
 }
 
 /* --- class plumbing -------------------------------------------------------- */
@@ -474,7 +662,12 @@ static void lv_path_gauge_constructor(const lv_obj_class_t *class_p,
     lv_path_gauge_t *gauge = gauge_from_obj(obj);
 
     gauge->path = NULL;
-    gauge->workspace = NULL;
+    gauge->vertices = NULL;
+    gauge->distances = NULL;
+    gauge->vertex_count = 0u;
+    gauge->total_distance = 0.0f;
+    gauge->measure = (pg_measure_t){ 0 };
+    gauge->zone_count = 0u;
     gauge->min_value = 0;
     gauge->max_value = 100;
     gauge->value = 0;
@@ -515,16 +708,14 @@ static void lv_path_gauge_event(const lv_obj_class_t *class_p, lv_event_t *e)
     else if (code == LV_EVENT_GET_SELF_SIZE) {
         lv_point_t *size = lv_event_get_param(e);
 
-        if (gauge->workspace != NULL && gauge->workspace->vertex_count > 0u) {
+        if (gauge->vertices != NULL && gauge->vertex_count > 0u) {
             int32_t w = 0;
             int32_t h = 0;
             uint16_t i;
 
-            for (i = 0; i < gauge->workspace->vertex_count; i++) {
-                int32_t x =
-                    (int32_t)gauge_coord(gauge->workspace->vertices[i].x);
-                int32_t y =
-                    (int32_t)gauge_coord(gauge->workspace->vertices[i].y);
+            for (i = 0; i < gauge->vertex_count; i++) {
+                int32_t x = (int32_t)gauge_coord(gauge->vertices[i].x);
+                int32_t y = (int32_t)gauge_coord(gauge->vertices[i].y);
 
                 if (x > w) {
                     w = x;

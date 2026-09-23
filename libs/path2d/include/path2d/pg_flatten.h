@@ -39,8 +39,9 @@ extern "C" {
  *                       Sink errors abort the walk immediately and are
  *                       propagated (e.g. PG_ERR_WORKSPACE_TOO_SMALL).
  * @return               PG_OK on success; PG_ERR_INVALID_ARG for NULL
- *                       path/writer/missing callbacks or non-positive
- *                       tolerance; PG_ERR_INVALID_PATH for malformed paths;
+ *                       path/writer/missing callbacks or a
+ *                       non-finite/non-positive tolerance;
+ *                       PG_ERR_INVALID_PATH for malformed paths;
  *                       otherwise the first error from the sink.
  *
  * @note No heap is used; the writer callbacks run synchronously.

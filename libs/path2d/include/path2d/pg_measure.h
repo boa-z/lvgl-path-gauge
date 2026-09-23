@@ -67,8 +67,8 @@ typedef struct {
  * @param[in]  tolerance        Flatness tolerance in path units (clamped to
  *                              >= PG_MIN_TOLERANCE).
  * @return                      PG_OK on success;
- *                              PG_ERR_INVALID_ARG for NULL pointers or
- *                              non-positive tolerance;
+ *                              PG_ERR_INVALID_ARG for NULL pointers or a
+ *                              non-finite/non-positive tolerance;
  *                              PG_ERR_INVALID_PATH for malformed paths;
  *                              PG_ERR_WORKSPACE_TOO_SMALL when the table does
  *                              not fit (geometry is never truncated);

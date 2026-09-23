@@ -69,7 +69,8 @@ typedef pg_result_t (*pg_move_fn)(void *ctx, pg_point_t to);
  * delivered to on_span with its owning command index.
  *
  * @param[in] path       Path to walk (validated, finite coordinates required).
- * @param[in] tolerance  Flatness tolerance in path units (clamped to
+ * @param[in] tolerance  Flatness tolerance in path units (must be finite and
+ *                       positive; clamped to
  *                       >= PG_MIN_TOLERANCE).
  * @param[in] on_move    Optional subpath-start sink (may be NULL).
  * @param[in] on_span    Leaf sink. Cannot be NULL.

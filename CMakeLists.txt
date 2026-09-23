@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(lvgl-path-gauge VERSION 0.3.0 LANGUAGES C)
+project(lvgl-path-gauge VERSION 0.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -64,6 +64,7 @@ if(LV_PATH_GAUGE_BUILD)
     add_subdirectory(src)
     if(LV_PATH_GAUGE_BUILD_EXAMPLES)
         add_subdirectory(examples/basic_progress)
+        add_subdirectory(examples/segmented_soc)
     endif()
 endif()
 

@@ -77,7 +77,7 @@ pg_result_t pg_measure_init(pg_measure_t *measure, const pg_path_t *path,
     if (workspace_count < PG_MEASURE_MIN_SAMPLES) {
         return PG_ERR_WORKSPACE_TOO_SMALL;
     }
-    if (!(tolerance > 0.0f)) {
+    if (!isfinite(tolerance) || !(tolerance > 0.0f)) {
         return PG_ERR_INVALID_ARG;
     }
 

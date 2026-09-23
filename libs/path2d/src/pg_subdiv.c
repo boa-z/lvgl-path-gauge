@@ -159,7 +159,9 @@ pg_result_t pg_path_walk(const pg_path_t *path, float tolerance,
     if (path == NULL || on_span == NULL) {
         return PG_ERR_INVALID_ARG;
     }
-    if (!(tolerance > 0.0f)) {
+    /* Non-finite tolerance is rejected uniformly: +Inf would flatten every
+     * span to its chord, silently degrading geometry. */
+    if (!isfinite(tolerance) || !(tolerance > 0.0f)) {
         return PG_ERR_INVALID_ARG;
     }
     if (tolerance < PG_MIN_TOLERANCE) {

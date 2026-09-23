@@ -62,9 +62,11 @@ jobs:
           cmake -S . -B build -DLV_PATH_GAUGE_BUILD=ON -DLV_PATH_GAUGE_SDL=ON
       - name: Build
         run: cmake --build build --parallel 4
-      - name: Run the windowed example headlessly
+      - name: Run the windowed examples headlessly
         env:
           SDL_VIDEODRIVER: dummy
-        run: ./build/examples/basic_progress/basic_progress --window --frames 20
+        run: |
+          ./build/examples/basic_progress/basic_progress --window --frames 20
+          ./build/examples/segmented_soc/segmented_soc --window --frames 20
       - name: Test
         run: ctest --test-dir build --output-on-failure

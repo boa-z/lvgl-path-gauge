@@ -492,6 +492,10 @@ int main(void)
               PG_ERR_INVALID_ARG);
     TU_EXPECT(pg_measure_init(&m, &line, g_ws, WS_BIG, -1.0f) ==
               PG_ERR_INVALID_ARG);
+    TU_EXPECT(pg_measure_init(&m, &line, g_ws, WS_BIG, tu_nan()) ==
+              PG_ERR_INVALID_ARG);
+    TU_EXPECT(pg_measure_init(&m, &line, g_ws, WS_BIG, tu_inf()) ==
+              PG_ERR_INVALID_ARG);
 
     /* Non-finite coordinates are rejected by validation. */
     nan_cmds[1].p1.x = tu_nan();

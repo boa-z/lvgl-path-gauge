@@ -1,24 +1,28 @@
 /**
  * @file main.c
- * @brief basic_progress example: non-circular S curve driven 0 -> 100 -> 0.
+ * @brief segmented_soc example: three-zone SOC arch driven 0 -> 100 -> 0.
  *
  * Copyright (c) 2026 boa-z
  * SPDX-License-Identifier: MIT
  *
- * Two front-ends share one gauge and one animation:
+ * Demonstrates the fixed-capacity value-domain zones of lv_path_gauge on a
+ * dark instrument background: [0, 20) #FC0101, [20, 40) #ED6C00 and
+ * [40, 100] #0DD462 over a #525051 track. Two front-ends share one gauge and
+ * one animation (same contract as the basic_progress example):
  *
  * - headless (default): a memory display renders into a staging frame, so the
  *   example runs in CI and on machines without a window system; frames at
- *   0/50/100% are written as PPM files.
+ *   0/20/40/100 are written as PPM files.
  * - SDL2 window (build with -DLV_PATH_GAUGE_SDL=ON, run with --window): a real
  *   window shows the animation on PC, optionally for a bounded number of
  *   frames (--frames N) so it can be scripted/verified headlessly with
  *   SDL_VIDEODRIVER=dummy.
  *
  * The value animation uses an application-side lv_timer: the gauge itself only
- * stores the value (no animation API).
+ * stores the value (no animation API), and set_value() stays clamp/store/
+ * invalidate.
  *
- * Usage: basic_progress [--window] [--frames N] [--smoke] [--output <dir>]
+ * Usage: segmented_soc [--window] [--frames N] [--smoke] [--output <dir>]
  */
 #include "lv_path_gauge.h"
 
@@ -33,13 +37,16 @@
 #define SCREEN_H 480
 #define DRAW_LINES 40
 
-/* Non-circular open contour: two cubics forming an S across the screen. */
-static const pg_cmd_t g_path_cmds[] = {
-    PG_MOVE_TO(60.0f, 400.0f),
-    PG_CUBIC_TO(60.0f, 280.0f, 200.0f, 320.0f, 320.0f, 240.0f),
-    PG_CUBIC_TO(440.0f, 160.0f, 560.0f, 200.0f, 640.0f, 80.0f),
+#define TRACK_COLOR 0x525051
+#define GAP_COLOR 0xE8E8E8 /* LV_PART_INDICATOR base colour (gap fallback) */
+#define BG_COLOR 0x101418
+
+/* Non-circular SOC arch: one open cubic across the dark screen. */
+static const pg_cmd_t g_soc_cmds[] = {
+    PG_MOVE_TO(90.0f, 400.0f),
+    PG_CUBIC_TO(90.0f, 80.0f, 710.0f, 80.0f, 710.0f, 400.0f),
 };
-static const pg_path_t g_path = { g_path_cmds, PG_ARRAY_SIZE(g_path_cmds) };
+static const pg_path_t g_soc_path = { g_soc_cmds, PG_ARRAY_SIZE(g_soc_cmds) };
 
 static uint16_t g_draw_buf[DRAW_LINES * SCREEN_W];
 static uint16_t g_frame[SCREEN_W * SCREEN_H];
@@ -49,6 +56,7 @@ static pg_measure_sample_t g_samples[LV_PATH_GAUGE_MAX_SAMPLES];
 static pg_point_t g_vertices[LV_PATH_GAUGE_MAX_VERTICES];
 static float g_distances[LV_PATH_GAUGE_MAX_VERTICES];
 static lv_path_gauge_workspace_t g_workspace;
+static lv_path_gauge_zone_t g_zones[3];
 static bool g_memory_display;
 
 struct anim_state {
@@ -104,13 +112,13 @@ static bool display_init_window(void)
     if (disp == NULL) {
         return false;
     }
-    lv_sdl_window_set_title(disp, "lv_path_gauge  basic_progress");
+    lv_sdl_window_set_title(disp, "lv_path_gauge  segmented_soc");
     lv_sdl_mouse_create();
     g_memory_display = false;
     return true;
 #else
     fprintf(stderr,
-            "basic_progress: --window needs an SDL2 build "
+            "segmented_soc: --window needs an SDL2 build "
             "(configure with -DLV_PATH_GAUGE_SDL=ON)\n");
     return false;
 #endif
@@ -135,7 +143,7 @@ static bool write_ppm(const char *dir, const char *name)
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     file = fopen(path, "wb");
     if (file == NULL) {
-        fprintf(stderr, "basic_progress: cannot write %s\n", path);
+        fprintf(stderr, "segmented_soc: cannot write %s\n", path);
         return false;
     }
     fprintf(file, "P6\n%d %d\n255\n", SCREEN_W, SCREEN_H);
@@ -149,7 +157,7 @@ static bool write_ppm(const char *dir, const char *name)
         fwrite(rgb, 1, sizeof(rgb), file);
     }
     fclose(file);
-    printf("basic_progress: wrote %s\n", path);
+    printf("segmented_soc: wrote %s\n", path);
     return true;
 }
 
@@ -237,26 +245,26 @@ int main(int argc, char **argv)
         }
     }
     else if (!display_init_headless()) {
-        fprintf(stderr, "basic_progress: display creation failed\n");
+        fprintf(stderr, "segmented_soc: display creation failed\n");
         return 1;
     }
 
-    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x101820),
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(BG_COLOR),
                               LV_PART_MAIN);
     lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, LV_PART_MAIN);
 
     g_gauge = lv_path_gauge_create(lv_screen_active());
     if (g_gauge == NULL) {
-        fprintf(stderr, "basic_progress: gauge create failed\n");
+        fprintf(stderr, "segmented_soc: gauge create failed\n");
         return 1;
     }
     lv_obj_set_size(g_gauge, SCREEN_W, SCREEN_H);
     lv_obj_set_pos(g_gauge, 0, 0);
-    lv_obj_set_style_line_width(g_gauge, 12, LV_PART_MAIN);
-    lv_obj_set_style_line_color(g_gauge, lv_color_hex(0x5A6470), LV_PART_MAIN);
+    lv_obj_set_style_line_width(g_gauge, 14, LV_PART_MAIN);
+    lv_obj_set_style_line_color(g_gauge, lv_color_hex(TRACK_COLOR), LV_PART_MAIN);
     lv_obj_set_style_line_opa(g_gauge, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_line_width(g_gauge, 6, LV_PART_INDICATOR);
-    lv_obj_set_style_line_color(g_gauge, lv_color_hex(0x00B4FF),
+    lv_obj_set_style_line_width(g_gauge, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_line_color(g_gauge, lv_color_hex(GAP_COLOR),
                                 LV_PART_INDICATOR);
     lv_obj_set_style_line_opa(g_gauge, LV_OPA_COVER, LV_PART_INDICATOR);
 
@@ -264,35 +272,53 @@ int main(int argc, char **argv)
                                      LV_PATH_GAUGE_MAX_SAMPLES, g_vertices,
                                      g_distances, LV_PATH_GAUGE_MAX_VERTICES,
                                      0.5f) != PG_OK) {
-        fprintf(stderr, "basic_progress: workspace init failed\n");
+        fprintf(stderr, "segmented_soc: workspace init failed\n");
         return 1;
     }
     {
-        pg_result_t res = lv_path_gauge_set_path(g_gauge, &g_path, &g_workspace);
+        pg_result_t res = lv_path_gauge_set_path(g_gauge, &g_soc_path, &g_workspace);
 
         if (res != PG_OK) {
-            fprintf(stderr, "basic_progress: set_path failed: %s\n",
+            fprintf(stderr, "segmented_soc: set_path failed: %s\n",
                     pg_result_str(res));
             return 1;
         }
     }
     lv_path_gauge_set_range(g_gauge, 0, 100);
+
+    /* Production SOC segmentation: half-open value zones, no overlap. */
+    g_zones[0] = (lv_path_gauge_zone_t){ 0, 20, lv_color_hex(0xFC0101) };
+    g_zones[1] = (lv_path_gauge_zone_t){ 20, 40, lv_color_hex(0xED6C00) };
+    g_zones[2] = (lv_path_gauge_zone_t){ 40, 100, lv_color_hex(0x0DD462) };
+    {
+        pg_result_t res = lv_path_gauge_set_zones(g_gauge, g_zones,
+                                                  (uint16_t)PG_ARRAY_SIZE(g_zones));
+
+        if (res != PG_OK) {
+            fprintf(stderr, "segmented_soc: set_zones failed: %s\n",
+                    pg_result_str(res));
+            return 1;
+        }
+    }
     lv_path_gauge_set_value(g_gauge, 0);
 
-    printf("basic_progress: display=%s total=%.2fpx workspace=%uB\n",
-           g_memory_display ? "memory" : "sdl-window",
+    printf("segmented_soc: display=%s zones=%u total=%.2fpx workspace=%uB\n",
+           g_memory_display ? "memory" : "sdl-window", 3u,
            (double)lv_path_gauge_get_total_distance(g_gauge),
            (unsigned)sizeof(lv_path_gauge_workspace_t));
 
-    /* Snapshot frames at 0 / 50 / 100 % (headless only). */
+    /* Snapshot frames at the zone boundaries and at full scale. */
     render_frame();
-    write_ppm(opt.output_dir, "basic_progress_000.ppm");
-    lv_path_gauge_set_value(g_gauge, 50);
+    write_ppm(opt.output_dir, "segmented_soc_000.ppm");
+    lv_path_gauge_set_value(g_gauge, 20);
     render_frame();
-    write_ppm(opt.output_dir, "basic_progress_050.ppm");
+    write_ppm(opt.output_dir, "segmented_soc_020.ppm");
+    lv_path_gauge_set_value(g_gauge, 40);
+    render_frame();
+    write_ppm(opt.output_dir, "segmented_soc_040.ppm");
     lv_path_gauge_set_value(g_gauge, 100);
     render_frame();
-    write_ppm(opt.output_dir, "basic_progress_100.ppm");
+    write_ppm(opt.output_dir, "segmented_soc_100.ppm");
 
     if (opt.smoke) {
         /* Deterministic 0 -> 100 -> 0 sweep with a redraw-cost measurement. */
@@ -306,8 +332,8 @@ int main(int argc, char **argv)
             render_frame();
         }
         secs = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
-        printf("basic_progress: %d frames in %.3fs (%.2f ms/frame)\n", 50,
-               secs, secs * 1000.0 / 50.0);
+        printf("segmented_soc: %d frames in %.3fs (%.2f ms/frame)\n", 50, secs,
+               secs * 1000.0 / 50.0);
     }
 
     /* Animation loop; runs until --frames elapses (window mode keeps the
@@ -338,7 +364,7 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("basic_progress: done value=%d ticks=%u reversals=%d\n", state.value,
+    printf("segmented_soc: done value=%d ticks=%u reversals=%d\n", state.value,
            state.ticks, state.reversals);
     if (opt.smoke) {
         /* The CI smoke sweep must complete exactly 0 -> 100 -> 0. */

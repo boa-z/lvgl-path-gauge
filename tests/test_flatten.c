@@ -195,6 +195,14 @@ int main(void)
     TU_EXPECT(pg_path_flatten(&cv, 1e-9f, &writer) == PG_OK);
     TU_EXPECT(g_rec.count < 5000u);
 
+    /* Non-finite tolerance is rejected, never silently flattened. */
+    tu_rec_reset(&g_rec);
+    writer = tu_rec_writer(&g_rec);
+    TU_EXPECT(pg_path_flatten(&cv, tu_inf(), &writer) == PG_ERR_INVALID_ARG);
+    TU_EXPECT(pg_path_flatten(&cv, tu_nan(), &writer) == PG_ERR_INVALID_ARG);
+    TU_EXPECT(pg_path_flatten(&cv, 0.0f, &writer) == PG_ERR_INVALID_ARG);
+    TU_EXPECT(g_rec.calls == 0u);
+
     /* Sink errors abort immediately and are propagated unchanged. */
     tu_rec_reset(&g_rec);
     g_rec.fail_with = PG_ERR_WORKSPACE_TOO_SMALL;

@@ -24,6 +24,16 @@ static const pg_cmd_t g_s_curve[] = {
 };
 static const pg_path_t g_s_path = { g_s_curve, PG_ARRAY_SIZE(g_s_curve) };
 
+static pg_measure_sample_t g_samples[LV_PATH_GAUGE_MAX_SAMPLES];
+static pg_point_t g_vertices[LV_PATH_GAUGE_MAX_VERTICES];
+static float g_distances[LV_PATH_GAUGE_MAX_VERTICES];
+static lv_path_gauge_workspace_t g_ws;
+
+static pg_measure_sample_t g_clip_samples[LV_PATH_GAUGE_MAX_SAMPLES];
+static pg_point_t g_clip_vertices[LV_PATH_GAUGE_MAX_VERTICES];
+static float g_clip_distances[LV_PATH_GAUGE_MAX_VERTICES];
+static lv_path_gauge_workspace_t g_clip_ws;
+
 /** Renders at the given value and counts track/progress pixels. */
 static void render_and_count(lv_test_display_t *td, lv_obj_t *gauge, int32_t value,
                              unsigned *track, unsigned *progress)
@@ -39,7 +49,6 @@ int main(void)
     lv_test_display_t td;
     lv_obj_t *screen;
     lv_obj_t *gauge;
-    static lv_path_gauge_workspace_t ws;
     unsigned track0;
     unsigned track50;
     unsigned track100;
@@ -66,9 +75,12 @@ int main(void)
     lv_obj_set_style_line_color(gauge, PROGRESS_COLOR, LV_PART_INDICATOR);
     lv_obj_set_style_line_opa(gauge, LV_OPA_COVER, LV_PART_INDICATOR);
 
-    lv_path_gauge_workspace_init(&ws, 0.5f);
-    TU_EXPECT(lv_path_gauge_set_path(gauge, &g_s_path, &ws) == PG_OK);
-    TU_EXPECT(lv_path_gauge_get_vertex_count(gauge) > 2u);
+    TU_EXPECT(lv_path_gauge_workspace_init(&g_ws, g_samples,
+                                           LV_PATH_GAUGE_MAX_SAMPLES, g_vertices,
+                                           g_distances, LV_PATH_GAUGE_MAX_VERTICES,
+                                           0.5f) == PG_OK);
+    TU_EXPECT(lv_path_gauge_set_path(gauge, &g_s_path, &g_ws) == PG_OK);
+    TU_EXPECT(lv_path_gauge_get_total_distance(gauge) > 100.0f);
 
     /* 0%: track only. */
     render_and_count(&td, gauge, 0, &track0, &progress0);
@@ -100,7 +112,6 @@ int main(void)
      * be clipped by the object's invalid area. */
     {
         lv_obj_t *clipped = lv_path_gauge_create(screen);
-        static lv_path_gauge_workspace_t ws2;
         unsigned outside;
 
         TU_EXPECT(clipped != NULL);
@@ -110,8 +121,12 @@ int main(void)
         lv_obj_set_style_line_color(clipped, TRACK_COLOR, LV_PART_MAIN);
         lv_obj_set_style_line_opa(clipped, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_line_width(clipped, 0, LV_PART_INDICATOR);
-        lv_path_gauge_workspace_init(&ws2, 0.5f);
-        TU_EXPECT(lv_path_gauge_set_path(clipped, &g_s_path, &ws2) == PG_OK);
+        TU_EXPECT(lv_path_gauge_workspace_init(&g_clip_ws, g_clip_samples,
+                                               LV_PATH_GAUGE_MAX_SAMPLES,
+                                               g_clip_vertices, g_clip_distances,
+                                               LV_PATH_GAUGE_MAX_VERTICES,
+                                               0.5f) == PG_OK);
+        TU_EXPECT(lv_path_gauge_set_path(clipped, &g_s_path, &g_clip_ws) == PG_OK);
         lv_path_gauge_set_value(clipped, 0);
         lv_test_render(&td, screen);
         outside = lv_test_count_color_outside(&td, TRACK_COLOR, COLOR_TOL, 210,

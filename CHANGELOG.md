@@ -28,6 +28,10 @@ All notable changes to this project will be documented in this file.
   memory-display draw smoke test (0/25/50/100%, colour counts, clip check).
 - `examples/basic_progress`: non-circular S curve animated 0 -> 100 -> 0 on a
   memory display with PPM snapshots and a deterministic `--smoke` mode.
+- Optional SDL2 window front-end for the example
+  (`-DLV_PATH_GAUGE_SDL=ON`, `--window [--frames N]`) so the animation can be
+  watched on PC; the widget itself has no SDL dependency and CI runs the
+  windowed example headlessly with `SDL_VIDEODRIVER=dummy`.
 - CI job building the widget, tests and example against the pinned LVGL
   v9.1.0 (GCC/Clang, plain and ASan+UBSan).
 

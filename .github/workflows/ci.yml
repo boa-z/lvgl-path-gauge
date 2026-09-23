@@ -48,3 +48,23 @@ jobs:
         run: cmake --build build --parallel 4
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # The SDL2 window front-end needs libsdl2; build it and run the example with
+  # the dummy video driver so the interactive path cannot rot unnoticed.
+  sdl-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL2
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build -DLV_PATH_GAUGE_BUILD=ON -DLV_PATH_GAUGE_SDL=ON
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Run the windowed example headlessly
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: ./build/examples/basic_progress/basic_progress --window --frames 20
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

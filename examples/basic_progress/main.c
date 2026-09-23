@@ -5,12 +5,20 @@
  * Copyright (c) 2026 boa-z
  * SPDX-License-Identifier: MIT
  *
- * Runs headless against a memory display, so it works in CI and on machines
- * without a window system. Frames at 0%, 50% and 100% are written as PPM
- * files for visual inspection. The value animation uses an application-side
- * lv_timer: the gauge itself only stores the value (no animation API).
+ * Two front-ends share one gauge and one animation:
  *
- * Usage: basic_progress [--smoke] [--output <dir>]
+ * - headless (default): a memory display renders into a staging frame, so the
+ *   example runs in CI and on machines without a window system; frames at
+ *   0/50/100% are written as PPM files.
+ * - SDL2 window (build with -DLV_PATH_GAUGE_SDL=ON, run with --window): a real
+ *   window shows the animation on PC, optionally for a bounded number of
+ *   frames (--frames N) so it can be scripted/verified headlessly with
+ *   SDL_VIDEODRIVER=dummy.
+ *
+ * The value animation uses an application-side lv_timer: the gauge itself only
+ * stores the value (no animation API).
+ *
+ * Usage: basic_progress [--window] [--frames N] [--smoke] [--output <dir>]
  */
 #include "lv_path_gauge.h"
 
@@ -38,6 +46,16 @@ static uint16_t g_frame[SCREEN_W * SCREEN_H];
 
 static lv_obj_t *g_gauge;
 static lv_path_gauge_workspace_t g_workspace;
+static bool g_memory_display;
+
+struct anim_state {
+    int32_t value;   /**< Current value. */
+    int32_t step;    /**< Value delta per tick. */
+    unsigned ticks;  /**< Ticks served. */
+    int reversals;   /**< Times the sweep turned around. */
+};
+
+/* --- headless memory display ---------------------------------------------- */
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
@@ -60,6 +78,43 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     lv_display_flush_ready(disp);
 }
 
+static bool display_init_headless(void)
+{
+    lv_display_t *disp = lv_display_create(SCREEN_W, SCREEN_H);
+
+    if (disp == NULL) {
+        return false;
+    }
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(disp, flush_cb);
+    lv_display_set_buffers(disp, g_draw_buf, NULL, sizeof(g_draw_buf),
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    g_memory_display = true;
+    return true;
+}
+
+static bool display_init_window(void)
+{
+#if defined(LV_PATH_GAUGE_SDL) && LV_PATH_GAUGE_SDL
+    lv_display_t *disp = lv_sdl_window_create(SCREEN_W, SCREEN_H);
+
+    if (disp == NULL) {
+        return false;
+    }
+    lv_sdl_window_set_title(disp, "lv_path_gauge  basic_progress");
+    lv_sdl_mouse_create();
+    g_memory_display = false;
+    return true;
+#else
+    fprintf(stderr,
+            "basic_progress: --window needs an SDL2 build "
+            "(configure with -DLV_PATH_GAUGE_SDL=ON)\n");
+    return false;
+#endif
+}
+
+/* --- rendering ------------------------------------------------------------- */
+
 static void render_frame(void)
 {
     lv_obj_invalidate(lv_screen_active());
@@ -71,6 +126,9 @@ static bool write_ppm(const char *dir, const char *name)
     char path[512];
     FILE *file;
 
+    if (!g_memory_display) {
+        return true; /* SDL window mode has no staging frame */
+    }
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     file = fopen(path, "wb");
     if (file == NULL) {
@@ -92,15 +150,10 @@ static bool write_ppm(const char *dir, const char *name)
     return true;
 }
 
-struct anim_state {
-    int32_t value;   /**< Current value. */
-    int32_t step;    /**< Value delta per tick. */
-    unsigned ticks;  /**< Ticks served. */
-};
-
 static void anim_timer_cb(lv_timer_t *timer)
 {
     struct anim_state *state = lv_timer_get_user_data(timer);
+    int32_t before = state->value;
 
     state->value += state->step;
     if (state->value >= 100) {
@@ -114,36 +167,76 @@ static void anim_timer_cb(lv_timer_t *timer)
     /* The gauge only clamps/stores/invalidates; no geometry work here. */
     lv_path_gauge_set_value(g_gauge, state->value);
     state->ticks++;
+    if (state->value != before && (state->value == 0 || state->value == 100)) {
+        state->reversals++;
+    }
+}
+
+/* --- main ------------------------------------------------------------------ */
+
+struct options {
+    bool window;               /**< Use the SDL2 window display. */
+    bool smoke;                /**< Deterministic headless CI run. */
+    bool frames_set;           /**< --frames given. */
+    unsigned frames;           /**< Ticks to run before exiting. */
+    const char *output_dir;    /**< PPM output directory. */
+};
+
+static bool parse_options(int argc, char **argv, struct options *opt)
+{
+    int i;
+
+    memset(opt, 0, sizeof(*opt));
+    opt->output_dir = ".";
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--window") == 0) {
+            opt->window = true;
+        }
+        else if (strcmp(argv[i], "--smoke") == 0) {
+            opt->smoke = true;
+        }
+        else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+            opt->frames = (unsigned)strtoul(argv[++i], NULL, 10);
+            opt->frames_set = true;
+        }
+        else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+            opt->output_dir = argv[++i];
+        }
+        else {
+            fprintf(stderr,
+                    "usage: %s [--window] [--frames N] [--smoke] "
+                    "[--output <dir>]\n",
+                    argv[0]);
+            return false;
+        }
+    }
+    if (opt->smoke) {
+        opt->frames = 100;
+        opt->frames_set = true;
+    }
+    return true;
 }
 
 int main(int argc, char **argv)
 {
-    const char *output_dir = ".";
-    bool smoke = false;
-    struct anim_state state = { 0, 2, 0 };
-    lv_display_t *disp;
+    struct options opt;
+    struct anim_state state = { 0, 2, 0, 0 };
     lv_timer_t *timer;
-    int i;
 
-    for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--smoke") == 0) {
-            smoke = true;
-        }
-        else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
-            output_dir = argv[++i];
-        }
-        else {
-            fprintf(stderr, "usage: %s [--smoke] [--output <dir>]\n", argv[0]);
-            return 2;
-        }
+    if (!parse_options(argc, argv, &opt)) {
+        return 2;
     }
 
     lv_init();
-    disp = lv_display_create(SCREEN_W, SCREEN_H);
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_flush_cb(disp, flush_cb);
-    lv_display_set_buffers(disp, g_draw_buf, NULL, sizeof(g_draw_buf),
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    if (opt.window) {
+        if (!display_init_window()) {
+            return 1;
+        }
+    }
+    else if (!display_init_headless()) {
+        fprintf(stderr, "basic_progress: display creation failed\n");
+        return 1;
+    }
 
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x101820),
                               LV_PART_MAIN);
@@ -177,31 +270,30 @@ int main(int argc, char **argv)
     lv_path_gauge_set_range(g_gauge, 0, 100);
     lv_path_gauge_set_value(g_gauge, 0);
 
-    printf("basic_progress: vertices=%u total=%.2fpx measure=%.2fpx "
-           "workspace=%uB\n",
+    printf("basic_progress: display=%s vertices=%u total=%.2fpx "
+           "measure=%.2fpx workspace=%uB\n",
+           g_memory_display ? "memory" : "sdl-window",
            lv_path_gauge_get_vertex_count(g_gauge),
            (double)lv_path_gauge_get_total_distance(g_gauge),
            (double)g_workspace.measure.total_length,
            (unsigned)sizeof(lv_path_gauge_workspace_t));
 
-    /* Snapshot frames at 0 / 50 / 100 %. */
+    /* Snapshot frames at 0 / 50 / 100 % (headless only). */
     render_frame();
-    write_ppm(output_dir, "basic_progress_000.ppm");
+    write_ppm(opt.output_dir, "basic_progress_000.ppm");
     lv_path_gauge_set_value(g_gauge, 50);
     render_frame();
-    write_ppm(output_dir, "basic_progress_050.ppm");
+    write_ppm(opt.output_dir, "basic_progress_050.ppm");
     lv_path_gauge_set_value(g_gauge, 100);
     render_frame();
-    write_ppm(output_dir, "basic_progress_100.ppm");
+    write_ppm(opt.output_dir, "basic_progress_100.ppm");
 
-    if (smoke) {
-        /* Deterministic 0 -> 100 -> 0 animation, then exit. */
-        int reversals = 0;
+    if (opt.smoke) {
+        /* Deterministic 0 -> 100 -> 0 sweep with a redraw-cost measurement. */
         clock_t t0;
         double secs;
         int frame;
 
-        /* Redraw cost of the cached-geometry path (no measure/flatten). */
         t0 = clock();
         for (frame = 0; frame < 50; frame++) {
             lv_path_gauge_set_value(g_gauge, frame * 2);
@@ -210,29 +302,41 @@ int main(int argc, char **argv)
         secs = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
         printf("basic_progress: %d frames in %.3fs (%.2f ms/frame)\n", 50,
                secs, secs * 1000.0 / 50.0);
+    }
 
+    /* Animation loop; runs until --frames elapses (window mode keeps the
+     * window responsive with a short delay between iterations). */
+    if (opt.window) {
         timer = lv_timer_create(anim_timer_cb, 16, &state);
-        while (state.ticks < 100) {
-            int32_t before = state.value;
-
+        while (!opt.frames_set || state.ticks < opt.frames) {
             lv_tick_inc(16);
             lv_timer_handler();
-            if (state.value != before &&
-                (state.value == 0 || state.value == 100)) {
-                reversals++;
-            }
+            lv_delay_ms(5);
         }
         lv_timer_delete(timer);
-        printf("basic_progress: smoke done, value=%d ticks=%u reversals=%d\n",
-               state.value, state.ticks, reversals);
-        return (state.value == 0 && reversals == 2) ? 0 : 1;
+    }
+    else if (opt.frames_set) {
+        timer = lv_timer_create(anim_timer_cb, 16, &state);
+        while (state.ticks < opt.frames) {
+            lv_tick_inc(16);
+            lv_timer_handler();
+        }
+        lv_timer_delete(timer);
+    }
+    else {
+        timer = lv_timer_create(anim_timer_cb, 16, &state);
+        for (;;) {
+            lv_tick_inc(16);
+            lv_timer_handler();
+            lv_delay_ms(5);
+        }
     }
 
-    timer = lv_timer_create(anim_timer_cb, 16, &state);
-    for (;;) {
-        lv_tick_inc(16);
-        lv_timer_handler();
+    printf("basic_progress: done value=%d ticks=%u reversals=%d\n", state.value,
+           state.ticks, state.reversals);
+    if (opt.smoke) {
+        /* The CI smoke sweep must complete exactly 0 -> 100 -> 0. */
+        return (state.value == 0 && state.reversals == 2) ? 0 : 1;
     }
-    (void)timer;
     return 0;
 }

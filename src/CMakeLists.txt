@@ -26,6 +26,39 @@ if(NOT TARGET lvgl::lvgl)
     message(FATAL_ERROR "lv_path_gauge: LVGL target lvgl::lvgl not available")
 endif()
 
+# Optional SDL2 window driver (LV_USE_SDL is enabled by config/lv_conf_sdl.h).
+# SDL2 is attached to the LVGL target because the driver sources are compiled
+# there; the widget itself stays platform independent.
+if(LV_PATH_GAUGE_SDL)
+    find_package(SDL2 CONFIG QUIET)
+    if(NOT SDL2_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(SDL2_PC QUIET sdl2)
+        endif()
+    endif()
+
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(lvgl PUBLIC SDL2::SDL2)
+        set(LV_PATH_GAUGE_SDL_TARGET SDL2::SDL2)
+    elseif(TARGET SDL2::SDL2-static)
+        target_link_libraries(lvgl PUBLIC SDL2::SDL2-static)
+        set(LV_PATH_GAUGE_SDL_TARGET SDL2::SDL2-static)
+    elseif(SDL2_PC_FOUND)
+        target_include_directories(lvgl SYSTEM PUBLIC ${SDL2_PC_INCLUDE_DIRS})
+        target_link_libraries(lvgl PUBLIC ${SDL2_PC_LIBRARIES})
+        target_link_directories(lvgl PUBLIC ${SDL2_PC_LIBRARY_DIRS})
+        set(LV_PATH_GAUGE_SDL_TARGET "pkg-config sdl2")
+    else()
+        message(FATAL_ERROR
+            "LV_PATH_GAUGE_SDL=ON but SDL2 was not found. Install the SDL2 "
+            "development package (MSYS2 UCRT64: pacman -S "
+            "mingw-w64-ucrt-x86_64-SDL2) or pass "
+            "-DSDL2_DIR=<prefix>/lib/cmake/SDL2")
+    endif()
+    message(STATUS "lv_path_gauge: SDL2 window driver via ${LV_PATH_GAUGE_SDL_TARGET}")
+endif()
+
 add_library(lv_path_gauge STATIC lv_path_gauge.c)
 target_include_directories(lv_path_gauge
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../include

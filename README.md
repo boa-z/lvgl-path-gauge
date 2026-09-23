@@ -74,6 +74,26 @@ cmake -S . -B build-gauge -DLV_PATH_GAUGE_BUILD=ON \
       -DLV_PATH_GAUGE_LVGL_ROOT=/path/to/lvgl
 ```
 
+### Watching the animation on PC (SDL2 window)
+
+The example has an optional SDL2 window front-end so the animation can be
+viewed interactively; the widget code is identical to the headless build.
+
+```bash
+# MSYS2 UCRT64: pacman -S mingw-w64-ucrt-x86_64-SDL2
+cmake -S . -B build-sdl -DLV_PATH_GAUGE_BUILD=ON -DLV_PATH_GAUGE_SDL=ON \
+      -DLV_PATH_GAUGE_LVGL_ROOT=/path/to/lvgl
+cmake --build build-sdl
+./build-sdl/examples/basic_progress/basic_progress --window     # 0 -> 100 -> 0
+./build-sdl/examples/basic_progress/basic_progress --window --frames 300
+```
+
+`LV_PATH_GAUGE_SDL=ON` switches the LVGL configuration to
+`config/lv_conf_sdl.h` (`LV_USE_SDL 1`, software rendering only) and attaches
+SDL2 to the LVGL target; the gauge library itself never depends on SDL. The
+headless path stays the default, and CI compiles/runs the windowed example
+with `SDL_VIDEODRIVER=dummy` so the interactive path is still exercised.
+
 Strict warnings are target-scoped (`path2d_dev_flags`): `-Wall -Wextra
 -Wpedantic -Werror` for this project's targets only (`PATH2D_STRICT_WARNINGS`,
 default ON standalone / OFF as a subproject), so consumers never inherit them.

@@ -27,6 +27,15 @@ set(LV_PATH_GAUGE_LVGL_ROOT "" CACHE PATH
 set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/config/lv_conf.h" CACHE STRING
     "lv_conf.h used by the gauge host builds")
 
+# Optional SDL2 window front-end for the example programs (PC viewing).
+# Switches the LVGL configuration to config/lv_conf_sdl.h; the widget itself
+# never depends on SDL.
+option(LV_PATH_GAUGE_SDL "Build the examples with the SDL2 window driver" OFF)
+if(LV_PATH_GAUGE_SDL)
+    set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/config/lv_conf_sdl.h" CACHE STRING
+        "lv_conf.h used by the gauge host builds" FORCE)
+endif()
+
 # Target-scoped development flags: libraries/tests opt in explicitly, so
 # neither directory scopes nor installed consumers inherit -Werror or
 # sanitizer instrumentation.

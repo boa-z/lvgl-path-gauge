@@ -12,20 +12,20 @@ needle are all derived. This repository builds that foundation first
 ```text
 Application
       |
-lv_path_gauge        (Phase 4+, LVGL 9.1.0 widget)
+lv_path_gauge        LVGL 9.1.0 widget (Phase 4)
       |
-path2d               (pure C11, no LVGL/RTOS/heap)
+path2d               pure C11, no LVGL/RTOS/heap
 ```
 
-Current status: **Phase 0-3 complete** — repository, `path2d` core
-(LINE/QUAD/CUBIC, evaluate/derivative/split, shared adaptive flatten,
-arc-length LUT, `pg_measure_get_pos_tan[_normalized]()`), Phase 2.5 geometry
-hardening and Phase 3 (`pg_path_writer_t`, fixed-capacity path buffer,
-`pg_measure_slice[_normalized]()`). No LVGL widget yet (Phase 4, after
-review).
+Current status: **Phase 0–4 complete** — `path2d` core (LINE/QUAD/CUBIC,
+evaluate/derivative/split, shared adaptive flatten, arc-length LUT,
+`pg_measure_get_pos_tan[_normalized]()`), geometry hardening, writers/slicing,
+and the **minimal LVGL gauge** (single open contour: static track plus
+single-colour progress). Zones, ticks, needles, labels, animations, the SVG
+tool and the vector renderer are still to come.
 
 Normative documents: [original requirements](docs/requirements.md) §1–107 and
-[task book amendments](docs/task-book.md) §108–111.
+[task book amendments](docs/task-book.md) §108–117.
 
 ## Why not `lv_arc`?
 
@@ -43,27 +43,41 @@ libs/path2d/include/path2d/  pg_types, pg_path, pg_bezier, pg_flatten,
 libs/path2d/src/             pg_path, pg_bezier, pg_subdiv (shared
                              subdivision), pg_writer, pg_slice, pg_flatten,
                              pg_measure
-tests/                       host tests (CTest) + benchmark
-docs/requirements.md         original requirements §1-107
-docs/task-book.md            amendments §108-111 (headers, doxygen, comments)
-docs/architecture.md         geometry != renderer != widget
+include/lv_path_gauge.h      gauge widget API + caller-owned workspace
+src/                         widget implementation + LVGL integration CMake
+config/lv_conf.h             host/CI LVGL 9.1 configuration (reference)
+examples/basic_progress/     0 -> 100 -> 0 demo (memory display + PPM output)
+tests/                       host tests (CTest), benchmark and LVGL harness
+docs/                        requirements, task book, architecture
 ```
-
-Phase 4+ will add `src/lv_path_gauge*`, `examples/` and `tools/svg2path/`.
 
 ## Build and test (host)
 
 Requires CMake 3.16+ and a C11 compiler (GCC or Clang).
 
 ```bash
+# path2d only: no LVGL, no network
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
+
+# with the LVGL 9.1 gauge (fetches the pinned LVGL v9.1.0)
+cmake -S . -B build-gauge -DLV_PATH_GAUGE_BUILD=ON
+cmake --build build-gauge
+ctest --test-dir build-gauge --output-on-failure
+```
+
+Offline / vendor SDK builds can point at an existing LVGL source tree:
+
+```bash
+cmake -S . -B build-gauge -DLV_PATH_GAUGE_BUILD=ON \
+      -DLV_PATH_GAUGE_LVGL_ROOT=/path/to/lvgl
 ```
 
 Strict warnings are target-scoped (`path2d_dev_flags`): `-Wall -Wextra
--Wpedantic -Werror` for this project's targets only, so downstream consumers
-never inherit them. Sanitizer run (host only):
+-Wpedantic -Werror` for this project's targets only (`PATH2D_STRICT_WARNINGS`,
+default ON standalone / OFF as a subproject), so consumers never inherit them.
+Sanitizer run (host only):
 
 ```bash
 cmake -S . -B build-asan -DPATH2D_SANITIZE=ON
@@ -71,12 +85,12 @@ cmake --build build-asan
 ctest --test-dir build-asan --output-on-failure
 ```
 
-`PATH2D_BUILD_TESTS` defaults to ON for standalone builds and OFF when this
-repository is included as a subproject. CI (`.github/workflows/ci.yml`) runs
-GCC + Clang, plain and `address,undefined` sanitizers, with
-`UBSAN_OPTIONS=halt_on_error=1`.
+`PATH2D_BUILD_TESTS` and `LV_PATH_GAUGE_BUILD_EXAMPLES` default to ON for
+standalone builds and OFF as a subproject. CI (`.github/workflows/ci.yml`)
+runs GCC + Clang, plain and `address,undefined` sanitizers, for path2d alone
+and for the LVGL gauge against the pinned LVGL v9.1.0.
 
-## Quick start
+## Quick start (geometry only)
 
 ```c
 #include "path2d/pg_path.h"
@@ -113,22 +127,52 @@ pg_path_buffer_init(&buffer, slice_cmds, PG_ARRAY_SIZE(slice_cmds));
 pg_path_writer_t writer = pg_path_buffer_writer(&buffer);
 
 if (pg_measure_slice_normalized(&m, 0.2f, 0.8f, &writer) != PG_OK) {
-    /* writer overflow: the slice is incomplete, buffer.overflowed is set */
+    /* writer overflow: the buffer is poisoned, buffer.failure holds the code */
 }
-pg_path_buffer_to_path(&buffer, &slice); /* PG_ERR_WORKSPACE_TOO_SMALL if incomplete */
+pg_path_buffer_to_path(&buffer, &slice);
 ```
+
+## Quick start (LVGL gauge)
+
+```c
+#include "lv_path_gauge.h"
+
+static const pg_cmd_t soc_cmds[] = {           /* one open contour */
+    PG_MOVE_TO(60.0f, 400.0f),
+    PG_CUBIC_TO(60.0f, 280.0f, 200.0f, 320.0f, 320.0f, 240.0f),
+};
+static const pg_path_t soc_path = { soc_cmds, PG_ARRAY_SIZE(soc_cmds) };
+
+static lv_path_gauge_workspace_t gauge_ws;     /* caller-owned cache */
+
+lv_path_gauge_workspace_init(&gauge_ws, 0.5f);
+
+lv_obj_t *gauge = lv_path_gauge_create(lv_screen_active());
+lv_obj_set_size(gauge, 800, 480);              /* path coords are local px */
+lv_path_gauge_set_path(gauge, &soc_path, &gauge_ws);
+lv_path_gauge_set_range(gauge, 0, 100);
+lv_path_gauge_set_value(gauge, 50);            /* clamp + invalidate only */
+```
+
+Styles: `LV_PART_MAIN` is the track, `LV_PART_INDICATOR` the active progress
+(`line_width`, `line_color`, `line_opa`, `line_rounded`). The path, the
+workspace and the object must outlive each other as documented in the header;
+`lv_path_gauge_set_path(gauge, NULL, ws)` clears the gauge.
 
 ## Memory model
 
-- Paths are `const` and live in Flash; writers borrow caller storage.
-- Measurement workspace is caller-owned (`pg_measure_sample_t array[...]`);
-  `pg_path_buffer_t` borrows a caller-provided `pg_cmd_t` array.
-- The runtime path (init once, query many times) performs **zero heap
-  allocation**. A too-small workspace returns
-  `PG_ERR_WORKSPACE_TOO_SMALL` instead of silently truncating geometry, and
-  `pg_measure_init()` is fail-atomic (object zeroed on error).
+- Paths are `const` and live in Flash; writers and the gauge borrow caller
+  storage (`pg_measure_sample_t[]`, `lv_path_gauge_workspace_t`).
+- The runtime path (init once, query/draw many times) performs **zero heap
+  allocation**. `pg_measure_init()` is fail-atomic; a too-small workspace
+  returns `PG_ERR_WORKSPACE_TOO_SMALL` instead of truncating geometry, and a
+  failed `pg_path_buffer_t` write poisons the buffer (its original failure
+  code is reported by `pg_path_buffer_to_path()`).
+- The gauge is the only place that measures and flattens, and only inside
+  `lv_path_gauge_set_path()`. `lv_path_gauge_set_value()` just clamps, stores
+  and invalidates: progress is cut out of the cached polyline per frame.
 - Sizing guide: 128 samples cover typical instrument paths at 0.5-unit
-  tolerance; grow the array when init reports
+  tolerance; grow the workspace when an init reports
   `PG_ERR_WORKSPACE_TOO_SMALL`. Recursion is capped by `PG_MAX_RECURSION`
   (default 12) regardless of tolerance.
 
@@ -141,31 +185,36 @@ pg_path_buffer_to_path(&buffer, &slice); /* PG_ERR_WORKSPACE_TOO_SMALL if incomp
 - Multi-subpath semantics: MOVEs only move the cursor, a MOVE to the current
   position is a no-op, and all subpaths contribute to one continuous arc
   distance (the jump has zero length). A distance landing exactly on a
-  contour joint resolves to the later command with `t = 0`; slices emit an
-  extra `move_to` at such jumps instead of drawing a connecting line.
-- All public APIs define degenerate behavior (zero-length segments, repeated
-  control points, collinear backtracking, empty/MOVE-only paths): no crash,
-  no NaN/Inf, explicit `pg_result_t` codes. Collinear overshoot is
-  subdivided by the shared flatness engine, so lengths such as
-  `M(0,0) Q(100,0) (10,0)` are measured (~95.2632), not reduced to the chord.
+  contour joint resolves to the later command with `t = 0`; slices and
+  flattened output emit `move_to` at such contours instead of drawing a
+  connecting line (boundaries come from MOVE commands, never from comparing
+  coordinates).
+- Degenerate inputs are defined, never NaN/Inf: zero-length spans, repeated
+  control points, collinear backtracking, empty/MOVE-only paths. Collinear
+  overshoot such as `M(0,0) Q(100,0) (10,0)` is measured (~95.2632), not
+  reduced to its chord.
+- Tangents use a four-tier fallback: analytic derivative, then the local
+  direction of the adjacent measurable span, then the command chord, then
+  `(1, 0)`. Collapsed control handles at either end therefore still report
+  the true travel direction.
 
 ## Floating point
 
 v1 uses `float` with `f`-suffixed literals throughout. All geometric
 predicates share `PG_EPSILON`. No fixed-point until benchmarks demand it.
-Positioning accuracy is validated against dense-sampling oracles within
-0.2% of arc length; the returned distance parameter is LUT-interpolated
-(binary search + local t interpolation) and the position is evaluated on the
-original curve, so it is on-curve but not claimed to be an exact
-arc-length point.
+The returned distance parameter is LUT-interpolated (binary search + local t
+interpolation) and the position is evaluated on the original curve, so it is
+on-curve but not claimed to be an exact arc-length point; arc lengths are
+validated against dense-sampling oracles within 0.2%.
 
 ## Limitations (v1)
 
 - Single-precision only; no NURBS/B-spline/Catmull-Rom, no 3D.
-- `pg_measure_init()` flattens whole commands; slicing exists, path boolean
-  operations and offset curves are out of scope.
-- Multi-subpath paths measure one continuous distance; the future gauge
-  accepts a single open contour.
+- Gauge v1 draws a static track and a single-colour progress for one open
+  contour: no zones, ticks, needle, labels, animations, scaling/fitting or
+  vector renderer yet (see the task book for the phase plan).
+- `pg_measure_init()` measures whole commands; path boolean operations and
+  offset curves are out of scope.
 - Threading: objects are reentrant for concurrent read-only queries on
   separate objects; no internal synchronization. LVGL APIs must run on the
   LVGL thread.

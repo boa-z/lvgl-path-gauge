@@ -75,6 +75,10 @@
 
 ## 21–23 Slice、Writer、Flatten Writer
 
+> 修订：§112 将 flatten 的裸点回调（`pg_flatten_cb`）替换为 `pg_path_writer_t`
+> 输出（`move_to` + `line_to`），使 contour 边界与 sink 错误可表达；本节
+> `pg_flatten_cb` 仅为原始设计记录。
+
 - `pg_measure_slice()` 支持任意 [start,end] 弧长截取；Bézier 截取必须保持 Bézier（De Casteljau），不得退化为折线。
 - `pg_path_writer_t`：move_to/line_to/quad_to/cubic_to + ctx，供 slice 输出到 path buffer、LVGL Vector Path、测试收集器、调试 dump。
 - `pg_flatten_cb` + `pg_path_flatten(path, tolerance, cb, ctx)` 供 line renderer 消费。

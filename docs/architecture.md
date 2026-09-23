@@ -53,6 +53,40 @@ Bisection uses De Casteljau (`pg_quad_split` / `pg_cubic_split`) and is
 bounded by `PG_MAX_RECURSION`; leaf spans carry the owning command index and
 their local [t0, t1] so the LUT can use them directly.
 
+## Gauge pipeline (Phase 4)
+
+```text
+lv_path_gauge_set_path()                    once per path
+  topology check (exactly one MOVE, no CLOSE)
+  pg_measure_init()      -> arc-length LUT (workspace)
+  pg_path_flatten()      -> cached polyline + per-vertex cumulative distance
+                            (workspace, caller-owned)
+
+lv_path_gauge_set_value()                   per frame
+  clamp -> store -> lv_obj_invalidate()
+
+LV_EVENT_DRAW_MAIN
+  LV_PART_MAIN      : draw all cached segments              (track)
+  LV_PART_INDICATOR : draw segments clipped to [0, d(value)] (progress)
+```
+
+Progress cutting is pure cache arithmetic: each segment is interpolated by its
+stored distances, so no measurement, slicing or flattening happens per frame.
+`LV_EVENT_REFR_EXT_DRAW_SIZE` enlarges the invalid area by half the widest
+stroke plus any path point outside the object box, so thick strokes are never
+clipped. `LV_EVENT_GET_SELF_SIZE` reports the path bounding box for
+`LV_SIZE_CONTENT`. Everything uses public LVGL API only (drawing mirrors
+LVGL's own `lv_line`).
+
+## Ownership and lifetime
+
+| Object | Owner | Borrowed by | Lifetime rule |
+|---|---|---|---|
+| `pg_path_t` | application (usually `const`/Flash) | measure, flatten, gauge | must outlive the derived objects |
+| `pg_measure_sample_t[]` | application | `pg_measure_t` | must outlive queries |
+| `pg_cmd_t[]` buffer | application | `pg_path_buffer_t` | must outlive the writer/to_path view |
+| `lv_path_gauge_workspace_t` | application | gauge | must outlive the gauge's use of the path |
+
 ## Measurement pipeline
 
 ```text
@@ -67,13 +101,13 @@ pg_measure_get_pos_tan[_normalized]
   clamp distance, binary search O(log N)
   interpolate t inside the bracket (command-aware at contour joints)
   evaluate the ORIGINAL curve at t (LUT only locates)
-  tangent = unit curve derivative, chord then (1,0) fallback
+  tangent tiers: derivative -> adjacent measurable span -> chord -> (1, 0)
 
 pg_measure_slice
   locate both ends; MOVE at the slice start
   per command in range: restrict the curve with two De Casteljau splits
   (degree preserved, never a polyline), straight pieces -> line_to
-  position jumps between subpaths -> additional move_to (no drawn jump)
+  every MOVE command in range -> additional move_to (topology, not geometry)
 ```
 
 Cost per query: one endpoint walk over commands + `O(log N)` search + one

@@ -1,8 +1,8 @@
 # Task Book（任务书）
 
-> Sections 1–107: original project brief (2026-09-24), kept with the
-> project owner. This file records the normative amendments accepted
-> afterwards. Together they form the binding task book for `lvgl-path-gauge`.
+> `docs/requirements.md` 收录原始任务书 §1–107（本项目规范的自包含主体）；
+> 本文件记录其后的规范性修订 §108–111。两者共同构成 `lvgl-path-gauge` 的
+> 约束性任务书。
 
 ---
 
@@ -52,7 +52,7 @@ pg_result_t pg_measure_get_pos_tan_normalized(
 *   **禁止废话注释**：禁止 `// increment i` 这种毫无意义的注释。
 *   **数学公式溯源**：涉及几何算法（如 De Casteljau, Flatness estimator, Arc-length LUT 构建）时，必须用注释标明算法来源或数学推导逻辑。
     *   *示例*：`/* Flatness estimator: calculate max distance from control points to the chord (p0-p3). See SVG spec appendix. */`
-*   **魔法数字清零**：除了 `0` 和 `1`，代码中禁止出现未命名的浮点常量。必须使用 `#define` 或 `enum`，并附带注释说明物理意义（如 `#define PG_FLATNESS_TOLERANCE 0.25f /* px squared */`）。
+*   **魔法数字**：标准数学公式中的自然系数（De Casteljau 的 `0.5f`、Bernstein 基的 `2.0f`/`3.0f`、参数区间的 `1.0f` 等）**可以**直接使用，无需命名。禁止的是经验性、调参性或具有物理意义的常量匿名出现：容差、阈值、容量、上限、递归深度等必须用 `#define`/`enum` 命名，并注明语义与单位（如 `#define PG_FLATNESS_TOLERANCE 0.25f /* px */`）。
 
 #### 111. 结构体字段注释 (Struct Field Comments)
 

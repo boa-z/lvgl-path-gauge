@@ -53,21 +53,23 @@ Bisection uses De Casteljau (`pg_quad_split` / `pg_cubic_split`) and is
 bounded by `PG_MAX_RECURSION`; leaf spans carry the owning command index and
 their local [t0, t1] so the LUT can use them directly.
 
-## Gauge pipeline (Phase 4)
+## Gauge pipeline (Phase 4.5 + 5)
 
 ```text
 lv_path_gauge_set_path()                    once per path
   topology check (exactly one MOVE, no CLOSE)
-  pg_measure_init()      -> arc-length LUT (workspace)
-  pg_path_flatten()      -> cached polyline + per-vertex cumulative distance
-                            (workspace, caller-owned)
+  pg_measure_init()      -> arc-length LUT in caller samples storage
+  pg_path_flatten()      -> caller vertices + cumulative distances
+  metadata (pg_measure_t, vertex count, total distance) -> private instance
 
 lv_path_gauge_set_value()                   per frame
   clamp -> store -> lv_obj_invalidate()
 
 LV_EVENT_DRAW_MAIN
-  LV_PART_MAIN      : draw all cached segments              (track)
+  LV_PART_MAIN      : draw all cached segments               (track)
   LV_PART_INDICATOR : draw segments clipped to [0, d(value)] (progress)
+    zone_count == 0 : one sub-run, indicator base colour
+    zone_count  > 0 : partition [min, value] into base/zone sub-runs
 ```
 
 Progress cutting is pure cache arithmetic: each segment is interpolated by its
@@ -78,6 +80,28 @@ clipped. `LV_EVENT_GET_SELF_SIZE` reports the path bounding box for
 `LV_SIZE_CONTENT`. Everything uses public LVGL API only (drawing mirrors
 LVGL's own `lv_line`).
 
+### API freeze (Phase 4.5)
+
+`lv_path_gauge_workspace_t` is a pointer+capacity descriptor over caller
+storage; it contains no arrays, so its layout does not change with any
+capacity macro and the public ABI is stable. All runtime metadata lives in
+the private `lv_path_gauge_t`; the render-cache introspection getters are
+gone and `lv_path_gauge_clear_path()` owns the clearing semantics
+(`set_path(NULL)` is a caller error). Tolerance handling is uniform: NaN/Inf
+is rejected everywhere, `<= 0` selects the default.
+
+### Zone rendering (Phase 5)
+
+Zones are half-open value ranges `[start, end)` with a colour, validated
+(ascending, non-overlapping, `start < end`) and copied atomically into the
+fixed `LV_PATH_GAUGE_MAX_ZONES` slot table inside the instance — no per-zone
+objects, no geometry rebuild. Drawing partitions the active window
+`[min_value, value]` into base-colour gaps and zone-coloured sub-runs clipped
+to the current range; the stored zones are never rewritten. Rounded caps are
+applied only to the first and last emitted segment of the whole active run,
+so internal zone boundaries stay flat while the outer start and the true end
+keep the `LV_PART_INDICATOR` rounded style.
+
 ## Ownership and lifetime
 
 | Object | Owner | Borrowed by | Lifetime rule |
@@ -85,7 +109,8 @@ LVGL's own `lv_line`).
 | `pg_path_t` | application (usually `const`/Flash) | measure, flatten, gauge | must outlive the derived objects |
 | `pg_measure_sample_t[]` | application | `pg_measure_t` | must outlive queries |
 | `pg_cmd_t[]` buffer | application | `pg_path_buffer_t` | must outlive the writer/to_path view |
-| `lv_path_gauge_workspace_t` | application | gauge | must outlive the gauge's use of the path |
+| `lv_path_gauge_workspace_t` | application | gauge | pointer+capacity descriptor; the pointed-to arrays must outlive the gauge's use of the path |
+| `lv_path_gauge_zone_t[]` copy | gauge instance | — | copied by `set_zones()` into fixed `LV_PATH_GAUGE_MAX_ZONES` slots |
 
 ## Measurement pipeline
 
@@ -119,9 +144,13 @@ curve evaluation + one derivative. No per-frame flatten, no heap.
 const path (Flash)  +  caller workspace (RAM, fixed)  +  zero runtime heap
 ```
 
-Capacities are compile-time visible (`PG_MEASURE_MIN_SAMPLES`,
-per-gauge `LV_PATH_GAUGE_MAX_*` in later phases). Writers own no storage:
-`pg_path_buffer_t` borrows a caller-provided `pg_cmd_t` array.
+Capacities are compile-time visible (`PG_MEASURE_MIN_SAMPLES`; the gauge's
+`LV_PATH_GAUGE_MAX_SAMPLES` / `LV_PATH_GAUGE_MAX_VERTICES` are only
+recommended array sizes). The workspace descriptor carries pointers and
+capacities, so it stays 40 bytes on 64-bit hosts regardless of them. Writers
+own no storage: `pg_path_buffer_t` borrows a caller-provided `pg_cmd_t` array;
+zone tables are copied into the fixed `LV_PATH_GAUGE_MAX_ZONES` slots of the
+widget instance.
 
 ## Upstream note
 

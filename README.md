@@ -17,12 +17,13 @@ lv_path_gauge        LVGL 9.1.0 widget (Phase 4)
 path2d               pure C11, no LVGL/RTOS/heap
 ```
 
-Current status: **Phase 0–4 complete** — `path2d` core (LINE/QUAD/CUBIC,
+Current status: **Phase 0–5 complete** — `path2d` core (LINE/QUAD/CUBIC,
 evaluate/derivative/split, shared adaptive flatten, arc-length LUT,
 `pg_measure_get_pos_tan[_normalized]()`), geometry hardening, writers/slicing,
-and the **minimal LVGL gauge** (single open contour: static track plus
-single-colour progress). Zones, ticks, needles, labels, animations, the SVG
-tool and the vector renderer are still to come.
+the **LVGL gauge** (single open contour: static track plus progress) with the
+frozen production API (Phase 4.5) and **fixed-capacity value-domain zones**
+(Phase 5). Ticks, needles, labels, animations, the SVG tool and the vector
+renderer are still to come.
 
 Normative documents: [original requirements](docs/requirements.md) §1–107 and
 [task book amendments](docs/task-book.md) §108–117.
@@ -47,6 +48,7 @@ include/lv_path_gauge.h      gauge widget API + caller-owned workspace
 src/                         widget implementation + LVGL integration CMake
 config/lv_conf.h             host/CI LVGL 9.1 configuration (reference)
 examples/basic_progress/     0 -> 100 -> 0 demo (memory display + PPM output)
+examples/segmented_soc/      three-zone SOC demo (zones, PPM/SDL window)
 tests/                       host tests (CTest), benchmark and LVGL harness
 docs/                        requirements, task book, architecture
 ```
@@ -76,7 +78,7 @@ cmake -S . -B build-gauge -DLV_PATH_GAUGE_BUILD=ON \
 
 ### Watching the animation on PC (SDL2 window)
 
-The example has an optional SDL2 window front-end so the animation can be
+The examples have an optional SDL2 window front-end so the animation can be
 viewed interactively; the widget code is identical to the headless build.
 
 ```bash
@@ -86,6 +88,8 @@ cmake -S . -B build-sdl -DLV_PATH_GAUGE_BUILD=ON -DLV_PATH_GAUGE_SDL=ON \
 cmake --build build-sdl
 ./build-sdl/examples/basic_progress/basic_progress --window     # 0 -> 100 -> 0
 ./build-sdl/examples/basic_progress/basic_progress --window --frames 300
+./build-sdl/examples/segmented_soc/segmented_soc --window       # three-zone SOC
+./build-sdl/examples/segmented_soc/segmented_soc --window --frames 300
 ```
 
 `LV_PATH_GAUGE_SDL=ON` switches the LVGL configuration to
@@ -163,9 +167,13 @@ static const pg_cmd_t soc_cmds[] = {           /* one open contour */
 };
 static const pg_path_t soc_path = { soc_cmds, PG_ARRAY_SIZE(soc_cmds) };
 
-static lv_path_gauge_workspace_t gauge_ws;     /* caller-owned cache */
+static pg_measure_sample_t lut[LV_PATH_GAUGE_MAX_SAMPLES];
+static pg_point_t verts[LV_PATH_GAUGE_MAX_VERTICES];
+static float dists[LV_PATH_GAUGE_MAX_VERTICES];
+static lv_path_gauge_workspace_t gauge_ws;     /* descriptor, not storage */
 
-lv_path_gauge_workspace_init(&gauge_ws, 0.5f);
+lv_path_gauge_workspace_init(&gauge_ws, lut, LV_PATH_GAUGE_MAX_SAMPLES,
+                             verts, dists, LV_PATH_GAUGE_MAX_VERTICES, 0.5f);
 
 lv_obj_t *gauge = lv_path_gauge_create(lv_screen_active());
 lv_obj_set_size(gauge, 800, 480);              /* path coords are local px */
@@ -176,13 +184,29 @@ lv_path_gauge_set_value(gauge, 50);            /* clamp + invalidate only */
 
 Styles: `LV_PART_MAIN` is the track, `LV_PART_INDICATOR` the active progress
 (`line_width`, `line_color`, `line_opa`, `line_rounded`). The path, the
-workspace and the object must outlive each other as documented in the header;
-`lv_path_gauge_set_path(gauge, NULL, ws)` clears the gauge.
+storage arrays and the object must outlive each other as documented in the
+header; `lv_path_gauge_clear_path(gauge)` clears the gauge explicitly.
+
+Segmented SOC colours are value-domain zones (half-open `[start, end)`,
+ascending, no overlap; gaps fall back to the indicator base colour):
+
+```c
+lv_path_gauge_zone_t zones[3];
+zones[0] = (lv_path_gauge_zone_t){ 0, 20, lv_color_hex(0xFC0101) };
+zones[1] = (lv_path_gauge_zone_t){ 20, 40, lv_color_hex(0xED6C00) };
+zones[2] = (lv_path_gauge_zone_t){ 40, 100, lv_color_hex(0x0DD462) };
+lv_path_gauge_set_zones(gauge, zones, 3);      /* atomic; no per-zone objects */
+```
+
+Zones only override the progress colour; `lv_path_gauge_clear_zones()` returns
+to the single-colour progress. See `examples/segmented_soc`.
 
 ## Memory model
 
-- Paths are `const` and live in Flash; writers and the gauge borrow caller
-  storage (`pg_measure_sample_t[]`, `lv_path_gauge_workspace_t`).
+- Paths are `const` and live in Flash; the gauge borrows caller storage
+  through `lv_path_gauge_workspace_t` (a pointer+capacity descriptor over the
+  LUT, vertex and distance arrays). All runtime metadata lives in the private
+  widget instance.
 - The runtime path (init once, query/draw many times) performs **zero heap
   allocation**. `pg_measure_init()` is fail-atomic; a too-small workspace
   returns `PG_ERR_WORKSPACE_TOO_SMALL` instead of truncating geometry, and a
@@ -191,8 +215,11 @@ workspace and the object must outlive each other as documented in the header;
 - The gauge is the only place that measures and flattens, and only inside
   `lv_path_gauge_set_path()`. `lv_path_gauge_set_value()` just clamps, stores
   and invalidates: progress is cut out of the cached polyline per frame.
+- Zones are copied into the instance (fixed `LV_PATH_GAUGE_MAX_ZONES` slots,
+  default 8) by `lv_path_gauge_set_zones()`; drawing adds no objects and no
+  geometry work.
 - Sizing guide: 128 samples cover typical instrument paths at 0.5-unit
-  tolerance; grow the workspace when an init reports
+  tolerance; grow the arrays when an init reports
   `PG_ERR_WORKSPACE_TOO_SMALL`. Recursion is capped by `PG_MAX_RECURSION`
   (default 12) regardless of tolerance.
 
@@ -230,9 +257,10 @@ validated against dense-sampling oracles within 0.2%.
 ## Limitations (v1)
 
 - Single-precision only; no NURBS/B-spline/Catmull-Rom, no 3D.
-- Gauge v1 draws a static track and a single-colour progress for one open
-  contour: no zones, ticks, needle, labels, animations, scaling/fitting or
-  vector renderer yet (see the task book for the phase plan).
+- The gauge draws a static track and a value-progress stroke with optional
+  fixed-capacity zones for one open contour: no ticks, needle, labels,
+  animations, scaling/fitting or vector renderer yet (see the task book for
+  the phase plan).
 - `pg_measure_init()` measures whole commands; path boolean operations and
   offset curves are out of scope.
 - Threading: objects are reentrant for concurrent read-only queries on

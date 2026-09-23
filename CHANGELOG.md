@@ -2,6 +2,66 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - candidate
+
+Phase 4.5 (production API freeze) and Phase 5 (segmented SOC zones).
+Candidate: awaiting review; the version is frozen once the phase review
+closes.
+
+### Changed (Phase 4.5: Production API Freeze)
+
+- `lv_path_gauge_workspace_t` no longer embeds fixed-size arrays: it now
+  stores caller-provided pointers plus capacities (samples, vertices,
+  distances), so its layout — and the ABI — is independent of
+  `LV_PATH_GAUGE_MAX_SAMPLES` / `LV_PATH_GAUGE_MAX_VERTICES` (now only
+  recommended capacities). The descriptor is 40 bytes on 64-bit hosts.
+- Runtime metadata (`pg_measure_t`, vertex count, total distance) moved into
+  the private widget instance; `set_path()` only reads the descriptor.
+- Removed the render-cache introspection API:
+  `lv_path_gauge_get_vertex_count()`, `lv_path_gauge_get_vertex_point()` and
+  `lv_path_gauge_get_vertex_distance()`. `lv_path_gauge_get_total_distance()`
+  stays as the single stable metric.
+- `lv_path_gauge_clear_path()` added; `set_path(obj, NULL, ws)` is now a
+  caller error (`PG_ERR_INVALID_ARG`, fail-atomic) instead of a clear.
+- `lv_path_gauge_workspace_init()` takes the storage pointers/capacities,
+  returns `pg_result_t` and is fail-atomic (a rejected init zeroes the
+  descriptor).
+- NaN/Inf tolerance is rejected uniformly across `pg_path_flatten()`,
+  `pg_measure_init()` and the gauge API (`PG_ERR_INVALID_ARG`); `<= 0` still
+  selects `LV_PATH_GAUGE_DEFAULT_TOLERANCE`.
+- The draw path no longer performs a double division: the value fraction uses
+  int64 intermediates with a single float division.
+
+### Added (Phase 5: Segmented SOC zones)
+
+- Fixed-capacity value-domain zones (`LV_PATH_GAUGE_MAX_ZONES`, default 8,
+  stored inside the widget instance): `lv_path_gauge_zone_t` is a half-open
+  `[start, end)` value range plus colour.
+- `lv_path_gauge_set_zones()` (atomic: full validation before any state
+  change; ascending starts, no overlap, gaps allowed, `start < end`) and
+  `lv_path_gauge_clear_zones()`.
+- Zone colour overrides only the progress colour; width/opacity/rounding keep
+  coming from `LV_PART_INDICATOR`. Zones outside the current range are
+  clipped at draw time and never rewritten.
+- Internal range renderer: the active progress is partitioned into base/zone
+  sub-runs without per-zone objects or geometry rebuilds; rounded caps apply
+  only to the outer start and the true end of the whole active run, so
+  internal zone boundaries stay flat.
+- `examples/segmented_soc`: 0..100 SOC arch with `#FC0101` / `#ED6C00` /
+  `#0DD462` zones on a `#525051` track over a dark background (headless PPM
+  snapshots + optional SDL2 window, CI smoke test).
+- `tests/test_lv_path_gauge_zones.c`: draw coverage at
+  0/1/19/20/21/39/40/41/50/53/75/99/100 (three-colour relations, boundary
+  semantics, monotone progress, no gap/overlap, cap policy, gap zones, range
+  clipping, atomic rejection, capacity), plus workspace-capacity exhaustion
+  and two-gauge coexistence coverage in `tests/test_lv_path_gauge.c`.
+
+### Notes
+
+- No runtime geometry heap; `set_value()` still only clamps/stores/
+  invalidates; LVGL stays pinned at v9.1.0.
+- Still out of scope: ticks, needle, SVG tool, ThorVG/vector backend.
+
 ## [0.3.0] - 2026-09-24
 
 ### Added (Phase 4: LVGL 9.1 minimal gauge)

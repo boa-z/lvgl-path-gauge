@@ -112,3 +112,21 @@ typedef struct {
 - `set_value()` 只 clamp/store/invalidate：禁止 measure/flatten/cache 重建；progress 直接从缓存折线按 distance range 裁切（禁止每帧 `pg_measure_slice()`+flatten）。
 - range 默认 0..100、value 默认 0；`max <= min` 拒绝；int32 极值范围用 int64 中间量，不得溢出。
 - v1 非目标：zones、SOC 三色、ticks、needle、label、animation convenience API、Vector/ThorVG、SVG。
+
+#### 118. Production API Freeze（Phase 4.5）
+
+- `lv_path_gauge_workspace_t` 只保存 caller 提供的指针与容量（samples / vertices / distances），禁止内嵌定长数组；结构布局不得随任何容量宏变化（ABI 稳定）。`LV_PATH_GAUGE_MAX_SAMPLES` / `LV_PATH_GAUGE_MAX_VERTICES` 仅作为推荐容量。
+- `pg_measure_t`、vertex count、total distance 等运行时元数据属于 private `lv_path_gauge_t`；`set_path()` 对 workspace 只读，不回写。
+- 移除 public `lv_path_gauge_get_vertex_*()` 渲染缓存内省 API；保留 `lv_path_gauge_get_total_distance()` 作为唯一稳定度量。
+- `lv_path_gauge_clear_path()` 承担清理语义；`set_path()` 不接受 NULL path（`PG_ERR_INVALID_ARG`，且与其他失败一样不留旧几何）。
+- `lv_path_gauge_workspace_init()` 接收指针+容量、返回 `pg_result_t`、fail-atomic（失败清零描述符，不触碰数组）。
+- NaN/Inf tolerance 在 path2d 与 gauge 的全部入口统一拒绝（`PG_ERR_INVALID_ARG`）；`tolerance <= 0` 仍选择默认容差。
+- draw-path 禁止 double division（value fraction 使用 int64 中间量与单次 float 除法）；保持 zero-extra-heap。
+
+#### 119. Segmented zones（Phase 5）
+
+- 固定容量 `LV_PATH_GAUGE_MAX_ZONES`（默认 8）存于 widget 实例内，不占 caller 存储、不改变任何 public 结构体布局。
+- zone = 半开值域 `[start, end)` + `lv_color_t`；`set_zones()` 原子：先全量校验后复制；要求 start 升序、不得 overlap、允许 gap、`start < end`；count 超容量返回 `PG_ERR_WORKSPACE_TOO_SMALL`；`clear_zones()` 清除，count == 0 等价清除。
+- gap 使用 `LV_PART_INDICATOR` 基础颜色；zone 只覆盖颜色，线宽/opa/rounded 仍来自 `LV_PART_INDICATOR`；zone 超出当前 range 时按 intersection 绘制，不修改配置。
+- 渲染：active progress 划分为 base/zone 子段；不得为 zone 创建 LVGL object、不得重建 path geometry；rounded caps 仅作用于整个 active run 的外起点与真正终点，内部 zone boundary 一律平头。
+- `set_value()` 仍只 clamp/store/invalidate。

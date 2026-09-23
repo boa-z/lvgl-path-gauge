@@ -183,9 +183,12 @@ lv_path_gauge_set_value(gauge, 50);            /* clamp + invalidate only */
 ```
 
 Styles: `LV_PART_MAIN` is the track, `LV_PART_INDICATOR` the active progress
-(`line_width`, `line_color`, `line_opa`, `line_rounded`). The path, the
-storage arrays and the object must outlive each other as documented in the
-header; `lv_path_gauge_clear_path(gauge)` clears the gauge explicitly.
+(`line_width`, `line_color`, `line_opa`, `line_rounded`). Geometry joints
+inside one colour run are always filled with same-colour caps, so thick
+strokes show no background seams; `line_rounded` only controls the true
+start/end of the stroke and zone boundaries stay flat. The path, the storage
+arrays and the object must outlive each other as documented in the header;
+`lv_path_gauge_clear_path(gauge)` clears the gauge explicitly.
 
 Segmented SOC colours are value-domain zones (half-open `[start, end)`,
 ascending, no overlap; gaps fall back to the indicator base colour):

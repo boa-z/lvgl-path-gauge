@@ -18,9 +18,10 @@ closes.
 - Runtime metadata (`pg_measure_t`, vertex count, total distance) moved into
   the private widget instance; `set_path()` only reads the descriptor.
 - Removed the render-cache introspection API:
-  `lv_path_gauge_get_vertex_count()`, `lv_path_gauge_get_vertex_point()` and
-  `lv_path_gauge_get_vertex_distance()`. `lv_path_gauge_get_total_distance()`
-  stays as the single stable metric.
+  `lv_path_gauge_get_vertex_count()`, `lv_path_gauge_get_vertex_point()`,
+  `lv_path_gauge_get_vertex_distance()` and
+  `lv_path_gauge_get_total_distance()`; the polyline length stays private
+  (debug only).
 - `lv_path_gauge_clear_path()` added; `set_path(obj, NULL, ws)` is now a
   caller error (`PG_ERR_INVALID_ARG`, fail-atomic) instead of a clear.
 - `lv_path_gauge_workspace_init()` takes the storage pointers/capacities,
@@ -55,6 +56,29 @@ closes.
   semantics, monotone progress, no gap/overlap, cap policy, gap zones, range
   clipping, atomic rejection, capacity), plus workspace-capacity exhaustion
   and two-gauge coexistence coverage in `tests/test_lv_path_gauge.c`.
+
+### Fixed (Phase 5.1: stroke continuity hardening)
+
+- Geometry joints inside one continuous colour run are now filled with a
+  same-colour round cap (LVGL renders the cap as a disc of the line width), so
+  the butt-joint wedge that leaked the background/track through at thick
+  widths is gone for both the `LV_PART_MAIN` track and the `LV_PART_INDICATOR`
+  progress.
+- Semantic boundaries (zone edges, progress end) stay flat: only the true
+  start/end of the whole stroke follows `line_rounded`, so adjacent zone
+  colours never overlap with caps.
+- Internal zone boundaries get a fixed ~1px local overlap
+  (`LV_PATH_GAUGE_BOUNDARY_OVERLAP`, never scaled with the line width) because
+  two butt cuts meeting at the same point leave a ~1px antialiased seam in
+  LVGL 9.1's software rasterizer.
+- Half-open zone wording corrected everywhere: `[start, end)` excludes `end`,
+  so a boundary value belongs to the later zone; at exactly that value the
+  later zone has zero visible length and only the earlier interval is painted.
+- `lv_path_gauge_get_total_distance()` removed from the public API (see
+  above); the polyline length stays private.
+- New regression `tests/test_lv_path_gauge_joints.c`: a 24px high-curvature
+  stroke on a memory display probes every cached joint for background holes
+  and checks the zone boundary for seams and colour reversal.
 
 ### Notes
 

@@ -117,7 +117,7 @@ typedef struct {
 
 - `lv_path_gauge_workspace_t` 只保存 caller 提供的指针与容量（samples / vertices / distances），禁止内嵌定长数组；结构布局不得随任何容量宏变化（ABI 稳定）。`LV_PATH_GAUGE_MAX_SAMPLES` / `LV_PATH_GAUGE_MAX_VERTICES` 仅作为推荐容量。
 - `pg_measure_t`、vertex count、total distance 等运行时元数据属于 private `lv_path_gauge_t`；`set_path()` 对 workspace 只读，不回写。
-- 移除 public `lv_path_gauge_get_vertex_*()` 渲染缓存内省 API；保留 `lv_path_gauge_get_total_distance()` 作为唯一稳定度量。
+- 移除 public `lv_path_gauge_get_vertex_*()` 渲染缓存内省 API；`lv_path_gauge_get_total_distance()` 亦不再 public，render cache/polyline length 保持 private/debug。
 - `lv_path_gauge_clear_path()` 承担清理语义；`set_path()` 不接受 NULL path（`PG_ERR_INVALID_ARG`，且与其他失败一样不留旧几何）。
 - `lv_path_gauge_workspace_init()` 接收指针+容量、返回 `pg_result_t`、fail-atomic（失败清零描述符，不触碰数组）。
 - NaN/Inf tolerance 在 path2d 与 gauge 的全部入口统一拒绝（`PG_ERR_INVALID_ARG`）；`tolerance <= 0` 仍选择默认容差。
@@ -126,7 +126,16 @@ typedef struct {
 #### 119. Segmented zones（Phase 5）
 
 - 固定容量 `LV_PATH_GAUGE_MAX_ZONES`（默认 8）存于 widget 实例内，不占 caller 存储、不改变任何 public 结构体布局。
-- zone = 半开值域 `[start, end)` + `lv_color_t`；`set_zones()` 原子：先全量校验后复制；要求 start 升序、不得 overlap、允许 gap、`start < end`；count 超容量返回 `PG_ERR_WORKSPACE_TOO_SMALL`；`clear_zones()` 清除，count == 0 等价清除。
+- zone = 半开值域 `[start, end)` + `lv_color_t`（start 含、end 不含）；边界值属于后继 zone，但该值处后继 zone 与 active progress 的交集为空（可见长度为 0），视觉上仅绘制前区间——不得表述为“边界值属于前一区间”。`set_zones()` 原子：先全量校验后复制；要求 start 升序、不得 overlap、允许 gap、`start < end`；count 超容量返回 `PG_ERR_WORKSPACE_TOO_SMALL`；`clear_zones()` 清除，count == 0 等价清除。
 - gap 使用 `LV_PART_INDICATOR` 基础颜色；zone 只覆盖颜色，线宽/opa/rounded 仍来自 `LV_PART_INDICATOR`；zone 超出当前 range 时按 intersection 绘制，不修改配置。
-- 渲染：active progress 划分为 base/zone 子段；不得为 zone 创建 LVGL object、不得重建 path geometry；rounded caps 仅作用于整个 active run 的外起点与真正终点，内部 zone boundary 一律平头。
+- 渲染：active progress 划分为 base/zone 子段；不得为 zone 创建 LVGL object、不得重建 path geometry；round cap 仅作用于整个 active run 的外起点与真正终点，zone boundary 一律平头。
 - `set_value()` 仍只 clamp/store/invalidate。
+
+#### 120. Stroke continuity（Phase 5.1）
+
+- 明确区分 geometry joint 与 semantic boundary：同一 continuous colour run 内部的所有 polyline joint 必须无缝——采用 LVGL round cap 的同色圆盘 filler（`round_end=1`，LVGL 在端点绘制直径=线宽的实心圆）或等价的显式 filler，禁止 background/track 透缝。
+- 只有整个 stroke/progress 的真正首尾按 `line_rounded` 使用 round cap；zone 边界必须平头，不得出现两个颜色圆帽重叠。
+- `LV_PART_MAIN` track 与 `LV_PART_INDICATOR` progress 使用同一 seamless joint 逻辑（joint 无缝与 `line_rounded` 无关）。
+- 禁止用降低 tolerance/增加采样掩盖接缝；回归测试必须用高曲率、20–30px 粗线在 memory display 上逐 cached joint 检查不得出现 background-coloured hole，并检查 zone 边界无 background seam、无颜色反序。
+- 若 butt zone 边界仍因 LVGL 9.1 软件光栅器出现 ≤1px AA 缝，可增加明确命名、最多约 1px、不随线宽缩放的局部 overlap 补偿。
+- `lv_path_gauge_get_total_distance()` 不再 public；render cache/polyline length 保持 private/debug。

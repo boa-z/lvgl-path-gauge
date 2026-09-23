@@ -92,15 +92,21 @@ is rejected everywhere, `<= 0` selects the default.
 
 ### Zone rendering (Phase 5)
 
-Zones are half-open value ranges `[start, end)` with a colour, validated
-(ascending, non-overlapping, `start < end`) and copied atomically into the
-fixed `LV_PATH_GAUGE_MAX_ZONES` slot table inside the instance — no per-zone
-objects, no geometry rebuild. Drawing partitions the active window
-`[min_value, value]` into base-colour gaps and zone-coloured sub-runs clipped
-to the current range; the stored zones are never rewritten. Rounded caps are
-applied only to the first and last emitted segment of the whole active run,
-so internal zone boundaries stay flat while the outer start and the true end
-keep the `LV_PART_INDICATOR` rounded style.
+Zones are half-open value ranges `[start, end)` with a colour (start included,
+end excluded; a boundary value belongs to the later zone and yields zero
+visible length there), validated (ascending, non-overlapping, `start < end`)
+and copied atomically into the fixed `LV_PATH_GAUGE_MAX_ZONES` slot table
+inside the instance — no per-zone objects, no geometry rebuild. Drawing
+partitions the active window `[min_value, value]` into base-colour gaps and
+zone-coloured sub-runs clipped to the current range; the stored zones are
+never rewritten.
+
+Stroke continuity (Phase 5.1): inside one continuous colour run every
+polyline joint is filled with a same-colour round cap (LVGL renders the cap
+as a disc of the line width), so butt-joint wedges can never leak the
+background or the track. Only the true start and end of the whole stroke
+follow `line_rounded`; zone boundaries and the progress end keep a flat butt
+cut, so adjacent colours never overlap with caps.
 
 ## Ownership and lifetime
 

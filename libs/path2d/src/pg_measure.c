@@ -1,148 +1,77 @@
-/* SPDX-License-Identifier: MIT */
+/**
+ * @file pg_measure.c
+ * @brief Arc-length measurement: LUT construction and distance queries.
+ *
+ * Copyright (c) 2026 boa-z
+ * SPDX-License-Identifier: MIT
+ */
 #include "path2d/pg_measure.h"
-#include "path2d/pg_path.h"
-#include "path2d/pg_bezier.h"
 
 #include <math.h>
+#include <string.h>
+
+#include "pg_internal.h"
 
 typedef struct {
-    pg_measure_t *measure;
-    float dist;
-    float tolerance;
-    pg_result_t err;
+    pg_measure_t *measure; /**< Target object being built. */
+    float dist;            /**< Running arc length. */
 } pg_build_t;
 
-static float pg_pt_dist(pg_point_t a, pg_point_t b)
+static pg_result_t pg_push(pg_build_t *build, float dist, float t,
+                           uint16_t command_index)
 {
-    float dx = b.x - a.x;
-    float dy = b.y - a.y;
-    return sqrtf(dx * dx + dy * dy);
+    pg_measure_sample_t *sample;
+
+    if (build->measure->sample_count >= build->measure->sample_capacity) {
+        return PG_ERR_WORKSPACE_TOO_SMALL;
+    }
+    sample = &build->measure->samples[build->measure->sample_count];
+    sample->distance = dist;
+    sample->t = t;
+    sample->command_index = command_index;
+    build->measure->sample_count++;
+    return PG_OK;
 }
 
-static float pg_line_dist(pg_point_t p, pg_point_t a, pg_point_t b)
+/* Accumulates flat-leaf chords. The zero sample is pushed lazily at the
+ * first measurable leaf so zero-length prefix commands never become the
+ * LUT anchor (and therefore never define the start tangent). */
+static pg_result_t pg_measure_leaf(void *ctx, const pg_span_t *span,
+                                   pg_span_kind_t kind, uint16_t command_index)
 {
-    float ex = b.x - a.x;
-    float ey = b.y - a.y;
-    float wx = p.x - a.x;
-    float wy = p.y - a.y;
-    float chord = sqrtf(ex * ex + ey * ey);
-    float cross;
+    pg_build_t *build = ctx;
+    float chord = pg_point_dist(span->p0, span->p3);
+    pg_result_t res;
 
-    if (!(chord > PG_EPSILON)) {
-        return sqrtf(wx * wx + wy * wy);
+    (void)kind;
+    if (chord <= PG_EPSILON) {
+        return PG_OK; /* truly degenerate leaf: consumes no distance */
     }
-    cross = ex * wy - ey * wx;
-    return fabsf(cross) / chord;
-}
-
-static float pg_clamp01(float t)
-{
-    if (!(t > 0.0f)) {
-        return 0.0f;
-    }
-    if (!(t < 1.0f)) {
-        return 1.0f;
-    }
-    return t;
-}
-
-static void pg_push(pg_build_t *b, float dist, float t, uint16_t cmd)
-{
-    pg_measure_sample_t *s;
-
-    if (b->err != PG_OK) {
-        return;
-    }
-    if (b->measure->sample_count >= b->measure->sample_capacity) {
-        b->err = PG_ERR_WORKSPACE_TOO_SMALL;
-        return;
-    }
-    s = &b->measure->samples[b->measure->sample_count];
-    s->distance = dist;
-    s->t = t;
-    s->command_index = cmd;
-    b->measure->sample_count++;
-}
-
-static void pg_quad_build(pg_build_t *b, pg_point_t p0, pg_point_t p1,
-                          pg_point_t p2, float t0, float t1, uint16_t cmd,
-                          unsigned depth)
-{
-    float chord;
-
-    if (b->err != PG_OK) {
-        return;
-    }
-    if (pg_line_dist(p1, p0, p2) <= b->tolerance || depth >= PG_MAX_RECURSION) {
-        chord = pg_pt_dist(p0, p2);
-        if (chord > PG_EPSILON) {
-            b->dist += chord;
-            pg_push(b, b->dist, t1, cmd);
+    if (build->measure->sample_count == 0u) {
+        res = pg_push(build, 0.0f, span->t0, command_index);
+        if (res != PG_OK) {
+            return res;
         }
-        return;
     }
-    {
-        pg_quad_t left;
-        pg_quad_t right;
-        float tm = (t0 + t1) * 0.5f;
-
-        pg_quad_split(p0, p1, p2, 0.5f, &left, &right);
-        pg_quad_build(b, left.p0, left.p1, left.p2, t0, tm, cmd, depth + 1u);
-        pg_quad_build(b, right.p0, right.p1, right.p2, tm, t1, cmd, depth + 1u);
-    }
-}
-
-static void pg_cubic_build(pg_build_t *b, pg_point_t p0, pg_point_t p1,
-                           pg_point_t p2, pg_point_t p3, float t0, float t1,
-                           uint16_t cmd, unsigned depth)
-{
-    float d1 = pg_line_dist(p1, p0, p3);
-    float d2 = pg_line_dist(p2, p0, p3);
-    float flat = d1 > d2 ? d1 : d2;
-    float chord;
-
-    if (b->err != PG_OK) {
-        return;
-    }
-    if (flat <= b->tolerance || depth >= PG_MAX_RECURSION) {
-        chord = pg_pt_dist(p0, p3);
-        if (chord > PG_EPSILON) {
-            b->dist += chord;
-            pg_push(b, b->dist, t1, cmd);
-        }
-        return;
-    }
-    {
-        pg_cubic_t left;
-        pg_cubic_t right;
-        float tm = (t0 + t1) * 0.5f;
-
-        pg_cubic_split(p0, p1, p2, p3, 0.5f, &left, &right);
-        pg_cubic_build(b, left.p0, left.p1, left.p2, left.p3, t0, tm, cmd,
-                       depth + 1u);
-        pg_cubic_build(b, right.p0, right.p1, right.p2, right.p3, tm, t1, cmd,
-                       depth + 1u);
-    }
+    build->dist += chord;
+    return pg_push(build, build->dist, span->t1, command_index);
 }
 
 pg_result_t pg_measure_init(pg_measure_t *measure, const pg_path_t *path,
-                            pg_measure_sample_t *workspace, uint16_t workspace_count,
-                            float tolerance)
+                            pg_measure_sample_t *workspace,
+                            uint16_t workspace_count, float tolerance)
 {
-    pg_build_t b;
-    pg_point_t cur = { 0.0f, 0.0f };
-    pg_point_t start = { 0.0f, 0.0f };
-    pg_point_t end;
-    int have = 0;
-    int found = 0;
-    pg_result_t ok;
-    uint16_t i;
-    float chord;
+    pg_build_t build;
+    pg_result_t res;
 
-    if (measure == NULL || path == NULL) {
+    if (measure == NULL) {
         return PG_ERR_INVALID_ARG;
     }
-    if (workspace == NULL) {
+    /* Fail-atomic: any failure below leaves the object zeroed (unusable)
+     * instead of a partially built LUT. */
+    memset(measure, 0, sizeof(*measure));
+
+    if (path == NULL || workspace == NULL) {
         return PG_ERR_INVALID_ARG;
     }
     if (workspace_count < PG_MEASURE_MIN_SAMPLES) {
@@ -151,82 +80,25 @@ pg_result_t pg_measure_init(pg_measure_t *measure, const pg_path_t *path,
     if (!(tolerance > 0.0f)) {
         return PG_ERR_INVALID_ARG;
     }
-    if (tolerance < PG_MIN_TOLERANCE) {
-        tolerance = PG_MIN_TOLERANCE;
-    }
-    ok = pg_path_validate(path);
-    if (ok != PG_OK) {
-        return ok;
-    }
 
     measure->path = path;
     measure->samples = workspace;
-    measure->sample_count = 0;
     measure->sample_capacity = workspace_count;
-    measure->total_length = 0.0f;
+    build.measure = measure;
+    build.dist = 0.0f;
 
-    b.measure = measure;
-    b.dist = 0.0f;
-    b.tolerance = tolerance;
-    b.err = PG_OK;
-
-    for (i = 0; i < path->cmd_count; i++) {
-        const pg_cmd_t *c = &path->cmds[i];
-
-        if (c->type == PG_CMD_MOVE) {
-            cur = c->p1;
-            start = c->p1;
-            have = 1;
-            continue;
-        }
-        if (!have) {
-            return PG_ERR_INVALID_PATH; /* unreachable after validate */
-        }
-        if (!found) {
-            pg_push(&b, 0.0f, 0.0f, i);
-            if (b.err != PG_OK) {
-                return b.err; /* unreachable: capacity >= 2 */
-            }
-            found = 1;
-        }
-        if (c->type == PG_CMD_LINE) {
-            end = c->p1;
-            chord = pg_pt_dist(cur, end);
-            if (chord > PG_EPSILON) {
-                b.dist += chord;
-                pg_push(&b, b.dist, 1.0f, i);
-            }
-            cur = end;
-        }
-        else if (c->type == PG_CMD_CLOSE) {
-            end = start;
-            chord = pg_pt_dist(cur, end);
-            if (chord > PG_EPSILON) {
-                b.dist += chord;
-                pg_push(&b, b.dist, 1.0f, i);
-            }
-            cur = end;
-        }
-        else if (c->type == PG_CMD_QUAD) {
-            pg_quad_build(&b, cur, c->p1, c->p2, 0.0f, 1.0f, i, 0u);
-            cur = c->p2;
-        }
-        else {
-            pg_cubic_build(&b, cur, c->p1, c->p2, c->p3, 0.0f, 1.0f, i, 0u);
-            cur = c->p3;
-        }
-        if (b.err != PG_OK) {
-            return b.err;
-        }
+    res = pg_path_walk(path, tolerance, NULL, pg_measure_leaf, &build);
+    if (res != PG_OK) {
+        memset(measure, 0, sizeof(*measure));
+        return res;
     }
-
-    if (!found) {
-        return PG_ERR_DEGENERATE; /* MOVE-only path */
+    if (measure->sample_count < PG_MEASURE_MIN_SAMPLES ||
+        !(build.dist > PG_EPSILON)) {
+        /* MOVE-only path, or every measurably long leaf was degenerate. */
+        memset(measure, 0, sizeof(*measure));
+        return PG_ERR_DEGENERATE;
     }
-    if (!(b.dist > PG_EPSILON)) {
-        return PG_ERR_DEGENERATE; /* all segments zero-length */
-    }
-    measure->total_length = b.dist;
+    measure->total_length = build.dist;
     return PG_OK;
 }
 
@@ -238,97 +110,18 @@ float pg_measure_get_length(const pg_measure_t *measure)
     return measure->total_length;
 }
 
-/* Resolve the absolute start/end points of command idx (a draw/CLOSE
- * command). Validation guarantees cmds[0] is MOVE, so `have` is set. */
-static void pg_cmd_span(const pg_path_t *path, uint16_t idx, pg_point_t *p0,
-                        pg_point_t *p1end, pg_cmd_t *cmd)
-{
-    pg_point_t cur = { 0.0f, 0.0f };
-    pg_point_t start = { 0.0f, 0.0f };
-    uint16_t i;
-
-    *p0 = path->cmds[0].p1;
-    *p1end = path->cmds[0].p1;
-    *cmd = path->cmds[0];
-    for (i = 0; i < path->cmd_count; i++) {
-        const pg_cmd_t *c = &path->cmds[i];
-
-        if (c->type == PG_CMD_MOVE) {
-            cur = c->p1;
-            start = c->p1;
-        }
-        else {
-            pg_point_t end;
-
-            if (c->type == PG_CMD_LINE) {
-                end = c->p1;
-            }
-            else if (c->type == PG_CMD_QUAD) {
-                end = c->p2;
-            }
-            else if (c->type == PG_CMD_CUBIC) {
-                end = c->p3;
-            }
-            else {
-                end = start;
-            }
-            if (i == idx) {
-                *p0 = cur;
-                *p1end = end;
-                *cmd = *c;
-                return;
-            }
-            cur = end;
-        }
-    }
-}
-
-static pg_point_t pg_eval_cmd(const pg_cmd_t *cmd, pg_point_t p0,
-                              pg_point_t pend, float t)
-{
-    pg_point_t out;
-
-    switch (cmd->type) {
-    case PG_CMD_QUAD:
-        return pg_quad_eval(p0, cmd->p1, cmd->p2, t);
-    case PG_CMD_CUBIC:
-        return pg_cubic_eval(p0, cmd->p1, cmd->p2, cmd->p3, t);
-    default: /* LINE and CLOSE are straight spans */
-        out.x = p0.x + (pend.x - p0.x) * t;
-        out.y = p0.y + (pend.y - p0.y) * t;
-        return out;
-    }
-}
-
-static pg_point_t pg_deriv_cmd(const pg_cmd_t *cmd, pg_point_t p0,
-                               pg_point_t pend, float t)
-{
-    pg_point_t out;
-
-    switch (cmd->type) {
-    case PG_CMD_QUAD:
-        return pg_quad_derivative(p0, cmd->p1, cmd->p2, t);
-    case PG_CMD_CUBIC:
-        return pg_cubic_derivative(p0, cmd->p1, cmd->p2, cmd->p3, t);
-    default:
-        out.x = pend.x - p0.x;
-        out.y = pend.y - p0.y;
-        return out;
-    }
-}
-
 pg_point_t pg_vec_normalize(pg_point_t v)
 {
-    float n = sqrtf(v.x * v.x + v.y * v.y);
+    float norm = sqrtf(v.x * v.x + v.y * v.y);
     pg_point_t out;
 
-    if (!(n > PG_EPSILON)) {
+    if (!(norm > PG_EPSILON)) {
         out.x = 1.0f;
         out.y = 0.0f;
         return out;
     }
-    out.x = v.x / n;
-    out.y = v.y / n;
+    out.x = v.x / norm;
+    out.y = v.y / norm;
     return out;
 }
 
@@ -341,43 +134,94 @@ pg_point_t pg_tangent_to_normal(pg_point_t tangent)
     return out;
 }
 
-/* Evaluate position + robust unit tangent for command span at t. */
-static void pg_span_pos_tan(const pg_path_t *path, uint16_t cmd_idx, float t,
-                            pg_point_t *position, pg_point_t *tangent)
+void pg_measure_locate(const pg_measure_t *measure, float distance,
+                       uint16_t *command_index, float *t)
 {
-    pg_point_t p0;
-    pg_point_t pend;
-    pg_cmd_t cmd;
-    pg_point_t d;
-    float n;
+    const pg_measure_sample_t *samples = measure->samples;
+    uint16_t lo;
+    uint16_t hi;
+    uint16_t mid;
+    float span;
+    float f;
 
-    pg_cmd_span(path, cmd_idx, &p0, &pend, &cmd);
-    t = pg_clamp01(t);
-    *position = pg_eval_cmd(&cmd, p0, pend, t);
-    d = pg_deriv_cmd(&cmd, p0, pend, t);
-    n = sqrtf(d.x * d.x + d.y * d.y);
-    if (n > PG_EPSILON) {
-        tangent->x = d.x / n;
-        tangent->y = d.y / n;
+    if (measure->sample_count < PG_MEASURE_MIN_SAMPLES) {
+        *command_index = samples[0].command_index;
+        *t = samples[0].t;
         return;
     }
-    d.x = pend.x - p0.x;
-    d.y = pend.y - p0.y;
-    *tangent = pg_vec_normalize(d);
+    if (distance <= 0.0f) {
+        *command_index = samples[0].command_index;
+        *t = samples[0].t;
+        return;
+    }
+    if (distance >= measure->total_length) {
+        *command_index = samples[measure->sample_count - 1u].command_index;
+        *t = samples[measure->sample_count - 1u].t;
+        return;
+    }
+
+    lo = 0;
+    hi = (uint16_t)(measure->sample_count - 1u);
+    while ((uint16_t)(hi - lo) > 1u) {
+        mid = (uint16_t)(lo + (hi - lo) / 2u);
+        if (samples[mid].distance <= distance) {
+            lo = mid;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    span = samples[hi].distance - samples[lo].distance;
+    f = (!(span > 0.0f)) ? 1.0f
+                         : (distance - samples[lo].distance) / span;
+    if (samples[lo].command_index == samples[hi].command_index) {
+        *t = samples[lo].t + (samples[hi].t - samples[lo].t) * f;
+    }
+    else {
+        /* Contour joint: the later command's local span begins at t = 0, so
+         * the gap maps linearly onto [0, samples[hi].t]. */
+        *t = samples[hi].t * f;
+    }
+    *command_index = samples[hi].command_index;
+}
+
+/* Curve-evaluated position and unit tangent for a located (cmd, t) pair. */
+static void pg_located_pos_tan(const pg_measure_t *measure, uint16_t index,
+                               float t, pg_point_t *position,
+                               pg_point_t *tangent)
+{
+    pg_point_t p0;
+    pg_point_t end;
+    pg_cmd_t cmd;
+    pg_point_t deriv;
+    float norm;
+
+    pg_cmd_span(measure->path, index, &p0, &end, &cmd);
+    *position = pg_cmd_eval(&cmd, p0, end, t);
+    if (tangent == NULL) {
+        return;
+    }
+    deriv = pg_cmd_deriv(&cmd, p0, end, t);
+    norm = sqrtf(deriv.x * deriv.x + deriv.y * deriv.y);
+    if (norm > PG_EPSILON) {
+        tangent->x = deriv.x / norm;
+        tangent->y = deriv.y / norm;
+        return;
+    }
+    /* Cusp or degenerate control polygon: fall back to the chord, then to
+     * (1, 0) via pg_vec_normalize(). Never NaN/Inf. */
+    deriv.x = end.x - p0.x;
+    deriv.y = end.y - p0.y;
+    *tangent = pg_vec_normalize(deriv);
 }
 
 pg_result_t pg_measure_get_pos_tan(const pg_measure_t *measure, float distance,
                                    pg_point_t *position, pg_point_t *tangent)
 {
-    const pg_measure_sample_t *s;
-    uint16_t lo;
-    uint16_t hi;
-    uint16_t mid;
-    float f;
-    float dd;
+    uint16_t index;
     float t;
 
-    if (measure == NULL || position == NULL || tangent == NULL) {
+    if (measure == NULL || position == NULL) {
         return PG_ERR_INVALID_ARG;
     }
     if (measure->samples == NULL || measure->path == NULL ||
@@ -387,45 +231,18 @@ pg_result_t pg_measure_get_pos_tan(const pg_measure_t *measure, float distance,
     if (!(measure->total_length > PG_EPSILON)) {
         return PG_ERR_DEGENERATE;
     }
-    if (distance != distance) { /* NaN */
+    if (isnan(distance)) {
         return PG_ERR_INVALID_ARG;
     }
-    if (distance <= 0.0f) {
-        /* t = 0 of the first draw command is exactly the path start
-         * (current point after the leading MOVEs). */
-        pg_span_pos_tan(measure->path, measure->samples[0].command_index, 0.0f,
-                        position, tangent);
-        return PG_OK;
+    if (distance < 0.0f) {
+        distance = 0.0f;
     }
-    if (distance >= measure->total_length) {
-        s = &measure->samples[measure->sample_count - 1u];
-        pg_span_pos_tan(measure->path, s->command_index, s->t, position, tangent);
-        return PG_OK;
+    if (distance > measure->total_length) {
+        distance = measure->total_length;
     }
 
-    s = measure->samples;
-    lo = 0;
-    hi = (uint16_t)(measure->sample_count - 1u);
-    while ((uint16_t)(hi - lo) > 1u) {
-        mid = (uint16_t)(lo + (hi - lo) / 2u);
-        if (s[mid].distance <= distance) {
-            lo = mid;
-        }
-        else {
-            hi = mid;
-        }
-    }
-    dd = s[hi].distance - s[lo].distance;
-    f = (!(dd > 0.0f)) ? 1.0f : (distance - s[lo].distance) / dd;
-    if (s[lo].command_index == s[hi].command_index) {
-        t = s[lo].t + (s[hi].t - s[lo].t) * f;
-    }
-    else {
-        /* Boundary pair: lo ends the old command, hi starts a new one whose
-         * local span always begins at t = 0. */
-        t = s[hi].t * f;
-    }
-    pg_span_pos_tan(measure->path, s[hi].command_index, t, position, tangent);
+    pg_measure_locate(measure, distance, &index, &t);
+    pg_located_pos_tan(measure, index, t, position, tangent);
     return PG_OK;
 }
 
@@ -434,10 +251,10 @@ pg_result_t pg_measure_get_pos_tan_normalized(const pg_measure_t *measure,
                                               pg_point_t *position,
                                               pg_point_t *tangent)
 {
-    if (measure == NULL || position == NULL || tangent == NULL) {
+    if (measure == NULL || position == NULL) {
         return PG_ERR_INVALID_ARG;
     }
-    if (normalized != normalized) { /* NaN */
+    if (isnan(normalized)) {
         return PG_ERR_INVALID_ARG;
     }
     if (normalized <= 0.0f) {

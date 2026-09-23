@@ -1,13 +1,20 @@
-/* SPDX-License-Identifier: MIT */
-/* Path measurement: LUT, binary search, pos/tan, degenerate, workspace. */
+/**
+ * @file test_measure.c
+ * @brief Measurement: LUT, binary search, pos/tan, degenerate and hardening.
+ *
+ * Copyright (c) 2026 boa-z
+ * SPDX-License-Identifier: MIT
+ */
 #include "test_util.h"
+
+#include "path2d/pg_bezier.h"
 #include "path2d/pg_measure.h"
 #include "path2d/pg_path.h"
-#include "path2d/pg_bezier.h"
 
 #include <math.h>
+#include <string.h>
 
-#define WS_BIG 256u
+#define WS_BIG 1024u
 
 static pg_measure_sample_t g_ws[WS_BIG];
 
@@ -15,6 +22,7 @@ static float tu_len(pg_point_t a, pg_point_t b)
 {
     float dx = b.x - a.x;
     float dy = b.y - a.y;
+
     return sqrtf(dx * dx + dy * dy);
 }
 
@@ -52,7 +60,8 @@ static float tu_oracle_length(const pg_cmd_t *cmds, uint16_t n)
                 float t = (float)k / 20000.0f;
                 pg_point_t p;
 
-                if (cmds[i].type == PG_CMD_LINE || cmds[i].type == PG_CMD_CLOSE) {
+                if (cmds[i].type == PG_CMD_LINE ||
+                    cmds[i].type == PG_CMD_CLOSE) {
                     p.x = cur.x + (end.x - cur.x) * t;
                     p.y = cur.y + (end.y - cur.y) * t;
                 }
@@ -106,7 +115,8 @@ static pg_point_t tu_oracle_pos(const pg_cmd_t *cmds, uint16_t n, float dist)
                 float t = (float)k / 20000.0f;
                 pg_point_t p;
 
-                if (cmds[i].type == PG_CMD_LINE || cmds[i].type == PG_CMD_CLOSE) {
+                if (cmds[i].type == PG_CMD_LINE ||
+                    cmds[i].type == PG_CMD_CLOSE) {
                     p.x = cur.x + (end.x - cur.x) * t;
                     p.y = cur.y + (end.y - cur.y) * t;
                 }
@@ -191,10 +201,22 @@ int main(void)
         PG_MOVE_TO(20.0f, 0.0f),
         PG_LINE_TO(30.0f, 0.0f),
     };
+    static const pg_cmd_t sub_with_move_only[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_LINE_TO(10.0f, 0.0f),
+        PG_MOVE_TO(50.0f, 50.0f),
+        PG_MOVE_TO(10.0f, 0.0f),
+        PG_LINE_TO(20.0f, 0.0f),
+    };
     static const pg_cmd_t lead_moves[] = {
         PG_MOVE_TO(5.0f, 5.0f),
         PG_MOVE_TO(10.0f, 10.0f),
         PG_LINE_TO(20.0f, 10.0f),
+    };
+    static const pg_cmd_t zero_prefix[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_LINE_TO(0.0f, 0.0f),
+        PG_LINE_TO(0.0f, 100.0f),
     };
     static const pg_cmd_t zero_line[] = {
         PG_MOVE_TO(0.0f, 0.0f),
@@ -210,6 +232,20 @@ int main(void)
     static const pg_cmd_t bad_first[] = {
         PG_LINE_TO(10.0f, 0.0f),
     };
+    /* Collinear backtracking quad: the historical flatness bug. Every point
+     * lies on y = 0, yet the curve overshoots to x ~ 52.63 and returns to
+     * x = 10; the chord-only estimator reported length 10 instead of the true
+     * arc length ~ 95.2632. */
+    static const pg_cmd_t backtrack_quad[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_QUAD_TO(100.0f, 0.0f, 10.0f, 0.0f),
+    };
+    static const pg_cmd_t backtrack_cubic[] = {
+        PG_MOVE_TO(0.0f, 0.0f),
+        PG_CUBIC_TO(100.0f, 0.0f, -50.0f, 0.0f, 50.0f, 0.0f),
+    };
+    pg_cmd_t nan_cmds[2] = { PG_MOVE_TO(0.0f, 0.0f),
+                             PG_LINE_TO(10.0f, 0.0f) };
     pg_path_t line = { line_cmds, PG_ARRAY_SIZE(line_cmds) };
     pg_path_t vert = { vert_cmds, PG_ARRAY_SIZE(vert_cmds) };
     pg_path_t poly = { poly_cmds, PG_ARRAY_SIZE(poly_cmds) };
@@ -218,12 +254,19 @@ int main(void)
     pg_path_t cubic = { cubic_cmds, PG_ARRAY_SIZE(cubic_cmds) };
     pg_path_t scurve = { s_curve, PG_ARRAY_SIZE(s_curve) };
     pg_path_t two = { two_sub, PG_ARRAY_SIZE(two_sub) };
+    pg_path_t sub_moves = { sub_with_move_only,
+                            PG_ARRAY_SIZE(sub_with_move_only) };
     pg_path_t leads = { lead_moves, PG_ARRAY_SIZE(lead_moves) };
+    pg_path_t zero_pre = { zero_prefix, PG_ARRAY_SIZE(zero_prefix) };
     pg_path_t zero = { zero_line, PG_ARRAY_SIZE(zero_line) };
     pg_path_t moves = { move_only, PG_ARRAY_SIZE(move_only) };
     pg_path_t tiny_p = { tiny, PG_ARRAY_SIZE(tiny) };
     pg_path_t bad = { bad_first, PG_ARRAY_SIZE(bad_first) };
+    pg_path_t backtrack_q = { backtrack_quad, PG_ARRAY_SIZE(backtrack_quad) };
+    pg_path_t backtrack_c = { backtrack_cubic,
+                              PG_ARRAY_SIZE(backtrack_cubic) };
     pg_path_t empty = { line_cmds, 0 };
+    pg_path_t nan_path = { nan_cmds, PG_ARRAY_SIZE(nan_cmds) };
     pg_measure_t m;
     pg_measure_sample_t small_ws[4];
     pg_measure_sample_t one_ws[1];
@@ -249,6 +292,17 @@ int main(void)
     TU_EXPECT(pg_measure_get_pos_tan(&m, 150.0f, &pos, &tan) == PG_OK);
     TU_POINT_NEAR(pos, 100.0f, 0.0f, 1e-4f);
 
+    /* tangent may be NULL when only the position is needed. */
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 25.0f, &pos, NULL) == PG_OK);
+    TU_POINT_NEAR(pos, 25.0f, 0.0f, 1e-4f);
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, 0.25f, &pos, NULL) ==
+              PG_OK);
+    TU_POINT_NEAR(pos, 25.0f, 0.0f, 1e-4f);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 25.0f, NULL, &tan) ==
+              PG_ERR_INVALID_ARG);
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, 0.25f, NULL, &tan) ==
+              PG_ERR_INVALID_ARG);
+
     /* Vertical line tangent. */
     TU_EXPECT(pg_measure_init(&m, &vert, g_ws, WS_BIG, 0.5f) == PG_OK);
     TU_EXPECT(pg_measure_get_pos_tan(&m, 30.0f, &pos, &tan) == PG_OK);
@@ -270,7 +324,7 @@ int main(void)
               PG_OK);
     TU_POINT_NEAR(pos, 0.0f, 10.0f, 1e-3f);
 
-    /* Quad/cubic length vs dense oracle (< 0.2%). */
+    /* Quad/cubic/s-curve length vs dense oracle (< 0.2%). */
     TU_EXPECT(pg_measure_init(&m, &quad, g_ws, WS_BIG, 0.25f) == PG_OK);
     total = pg_measure_get_length(&m);
     ref = tu_oracle_length(quad_cmds, PG_ARRAY_SIZE(quad_cmds));
@@ -297,33 +351,74 @@ int main(void)
     {
         pg_point_t pa;
         pg_point_t pb;
-        pg_point_t ta;
-        pg_point_t na;
+        pg_point_t chord;
         float e = total * 1e-4f;
         float dot;
 
-        TU_EXPECT(pg_measure_get_pos_tan(&m, 0.37f * total - e, &pa, &ta) ==
+        TU_EXPECT(pg_measure_get_pos_tan(&m, 0.37f * total - e, &pa, NULL) ==
                   PG_OK);
-        TU_EXPECT(pg_measure_get_pos_tan(&m, 0.37f * total + e, &pb, &ta) ==
+        TU_EXPECT(pg_measure_get_pos_tan(&m, 0.37f * total + e, &pb, NULL) ==
                   PG_OK);
-        na.x = pb.x - pa.x;
-        na.y = pb.y - pa.y;
-        na = pg_vec_normalize(na);
-        dot = na.x * tan.x + na.y * tan.y;
+        chord.x = pb.x - pa.x;
+        chord.y = pb.y - pa.y;
+        chord = pg_vec_normalize(chord);
+        dot = chord.x * tan.x + chord.y * tan.y;
         TU_EXPECT(dot > 0.999f);
     }
 
-    /* Multi-subpath accumulates one continuous distance. */
+    /* Multi-subpath accumulates one continuous distance; the jump itself has
+     * zero length and contributes no geometry. */
     TU_EXPECT(pg_measure_init(&m, &two, g_ws, WS_BIG, 0.5f) == PG_OK);
     TU_NEAR(pg_measure_get_length(&m), 20.0f, 1e-4f);
     TU_EXPECT(pg_measure_get_pos_tan(&m, 15.0f, &pos, &tan) == PG_OK);
     TU_POINT_NEAR(pos, 25.0f, 0.0f, 1e-4f);
+
+    /* A MOVE-only subpath in the middle contributes nothing. */
+    TU_EXPECT(pg_measure_init(&m, &sub_moves, g_ws, WS_BIG, 0.5f) == PG_OK);
+    TU_NEAR(pg_measure_get_length(&m), 20.0f, 1e-4f);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 15.0f, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 15.0f, 0.0f, 1e-4f);
 
     /* Leading MOVEs: start is the last MOVE target. */
     TU_EXPECT(pg_measure_init(&m, &leads, g_ws, WS_BIG, 0.5f) == PG_OK);
     TU_NEAR(pg_measure_get_length(&m), 10.0f, 1e-4f);
     TU_EXPECT(pg_measure_get_pos_tan(&m, 0.0f, &pos, &tan) == PG_OK);
     TU_POINT_NEAR(pos, 10.0f, 10.0f, 1e-6f);
+
+    /* Zero-length prefix commands must not define the start tangent: the
+     * LUT anchors on the first measurable span, so the tangent at distance 0
+     * comes from the vertical line, not from the degenerate first one. */
+    TU_EXPECT(pg_measure_init(&m, &zero_pre, g_ws, WS_BIG, 0.5f) == PG_OK);
+    TU_NEAR(pg_measure_get_length(&m), 100.0f, 1e-4f);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 0.0f, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 0.0f, 0.0f, 1e-6f);
+    TU_POINT_NEAR(tan, 0.0f, 1.0f, 1e-6f);
+
+    /* Collinear backtracking quad regression (oracle 95.2632). */
+    TU_EXPECT(pg_measure_init(&m, &backtrack_q, g_ws, WS_BIG, 0.1f) == PG_OK);
+    total = pg_measure_get_length(&m);
+    ref = tu_oracle_length(backtrack_quad, PG_ARRAY_SIZE(backtrack_quad));
+    TU_NEAR(total, 95.2632f, 0.19f); /* 0.2% of the analytic value */
+    TU_NEAR(total / ref, 1.0f, 0.002f);
+    /* Start and end tangents follow the actual motion direction. */
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 0.0f, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 0.0f, 0.0f, 1e-4f);
+    TU_POINT_NEAR(tan, 1.0f, 0.0f, 1e-3f);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, total, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 10.0f, 0.0f, 0.05f);
+    TU_POINT_NEAR(tan, -1.0f, 0.0f, 1e-3f);
+    /* The turning point (x = 52.63) sits at arc distance 52.63. */
+    TU_EXPECT(pg_measure_get_pos_tan(&m, 52.63f, &pos, NULL) == PG_OK);
+    TU_NEAR(pos.x, 52.63f, 0.2f);
+
+    /* Collinear backtracking cubic regression. */
+    TU_EXPECT(pg_measure_init(&m, &backtrack_c, g_ws, WS_BIG, 0.1f) == PG_OK);
+    total = pg_measure_get_length(&m);
+    ref = tu_oracle_length(backtrack_cubic, PG_ARRAY_SIZE(backtrack_cubic));
+    TU_NEAR(total / ref, 1.0f, 0.002f);
+    TU_EXPECT(pg_measure_get_pos_tan(&m, total, &pos, &tan) == PG_OK);
+    TU_POINT_NEAR(pos, 50.0f, 0.0f, 0.05f);
+    TU_POINT_NEAR(tan, 1.0f, 0.0f, 1e-3f);
 
     /* Degenerate inputs: no crash, no NaN/Inf, explicit codes. */
     TU_EXPECT(pg_measure_init(&m, &zero, g_ws, WS_BIG, 0.5f) ==
@@ -351,9 +446,32 @@ int main(void)
     TU_EXPECT(pg_measure_init(&m, &line, g_ws, WS_BIG, -1.0f) ==
               PG_ERR_INVALID_ARG);
 
+    /* Non-finite coordinates are rejected by validation. */
+    nan_cmds[1].p1.x = tu_nan();
+    TU_EXPECT(pg_measure_init(&m, &nan_path, g_ws, WS_BIG, 0.5f) ==
+              PG_ERR_INVALID_PATH);
+
     /* Workspace exhaustion on a real curve: explicit error, no truncation. */
     TU_EXPECT(pg_measure_init(&m, &scurve, small_ws, 4, 0.25f) ==
               PG_ERR_WORKSPACE_TOO_SMALL);
+
+    /* Fail-atomic: any failure leaves the object zeroed, never partial. */
+    {
+        pg_measure_t failed;
+
+        memset(&failed, 0xAB, sizeof(failed));
+        TU_EXPECT(pg_measure_init(&failed, &scurve, small_ws, 4, 0.25f) ==
+                  PG_ERR_WORKSPACE_TOO_SMALL);
+        TU_EXPECT(failed.path == NULL && failed.samples == NULL &&
+                  failed.sample_count == 0u && failed.sample_capacity == 0u &&
+                  failed.total_length == 0.0f);
+        /* A different failure mode (validation) also clears the object. */
+        memset(&failed, 0x5A, sizeof(failed));
+        TU_EXPECT(pg_measure_init(&failed, &bad, g_ws, WS_BIG, 0.5f) ==
+                  PG_ERR_INVALID_PATH);
+        TU_EXPECT(failed.path == NULL && failed.samples == NULL &&
+                  failed.total_length == 0.0f);
+    }
 
     /* Query-side argument errors. */
     TU_EXPECT(pg_measure_init(&m, &line, g_ws, WS_BIG, 0.5f) == PG_OK);
@@ -361,17 +479,10 @@ int main(void)
               PG_ERR_INVALID_ARG);
     TU_EXPECT(pg_measure_get_pos_tan(&m, 1.0f, NULL, &tan) ==
               PG_ERR_INVALID_ARG);
-    TU_EXPECT(pg_measure_get_pos_tan(&m, 1.0f, &pos, NULL) ==
+    TU_EXPECT(pg_measure_get_pos_tan(&m, tu_nan(), &pos, &tan) ==
               PG_ERR_INVALID_ARG);
-    {
-        volatile float zero = 0.0f;
-        float nan_v = zero / zero;
-
-        TU_EXPECT(pg_measure_get_pos_tan(&m, nan_v, &pos, &tan) ==
-                  PG_ERR_INVALID_ARG);
-        TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, nan_v, &pos, &tan) ==
-                  PG_ERR_INVALID_ARG);
-    }
+    TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, tu_nan(), &pos, &tan) ==
+              PG_ERR_INVALID_ARG);
     TU_EXPECT(pg_measure_get_pos_tan_normalized(&m, -0.5f, &pos, &tan) ==
               PG_OK);
     TU_POINT_NEAR(pos, 0.0f, 0.0f, 1e-6f);

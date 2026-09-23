@@ -1,4 +1,10 @@
-/* SPDX-License-Identifier: MIT */
+/**
+ * @file pg_bezier.c
+ * @brief Quadratic/cubic Bezier evaluation, derivatives and De Casteljau splits.
+ *
+ * Copyright (c) 2026 boa-z
+ * SPDX-License-Identifier: MIT
+ */
 #include "path2d/pg_bezier.h"
 
 static float pg_clamp01(float t)

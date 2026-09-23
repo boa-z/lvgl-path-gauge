@@ -1,25 +1,35 @@
 cmake_minimum_required(VERSION 3.16)
-project(lvgl-path-gauge VERSION 0.1.0 LANGUAGES C)
+project(lvgl-path-gauge VERSION 0.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(PATH2D_SANITIZE "Enable AddressSanitizer+UndefinedBehaviorSanitizer (host only)" OFF)
-option(PATH2D_BUILD_TESTS "Build host tests" ON)
 
-if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-elseif(MSVC)
-    add_compile_options(/W4 /WX)
+# Tests default to ON for standalone builds and OFF when this repository is
+# consumed as a subproject.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(PATH2D_TOP_LEVEL ON)
+else()
+    set(PATH2D_TOP_LEVEL OFF)
 endif()
+option(PATH2D_BUILD_TESTS "Build host tests" ${PATH2D_TOP_LEVEL})
 
+# Target-scoped development flags: libraries/tests opt in explicitly, so
+# neither directory scopes nor installed consumers inherit -Werror or
+# sanitizer instrumentation.
+add_library(path2d_dev_flags INTERFACE)
+target_compile_options(path2d_dev_flags INTERFACE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Werror>
+    $<$<COMPILE_LANG_AND_ID:C,MSVC>:/W4;/WX>)
 if(PATH2D_SANITIZE)
     if(MSVC)
         message(FATAL_ERROR "PATH2D_SANITIZE is not supported with MSVC")
     endif()
-    add_compile_options(-fsanitize=address,undefined -g)
-    add_link_options(-fsanitize=address,undefined)
+    target_compile_options(path2d_dev_flags INTERFACE
+        -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    target_link_options(path2d_dev_flags INTERFACE -fsanitize=address,undefined)
 endif()
 
 add_subdirectory(libs/path2d)

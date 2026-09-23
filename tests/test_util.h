@@ -1,4 +1,10 @@
-/* SPDX-License-Identifier: MIT */
+/**
+ * @file test_util.h
+ * @brief Minimal assertion helpers shared by the host test programs.
+ *
+ * Copyright (c) 2026 boa-z
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef TEST_UTIL_H
 #define TEST_UTIL_H
 
@@ -29,4 +35,19 @@ static int tu_failed;
     (printf("%s: %d checks, %d failures\n", __FILE__, tu_checks, tu_failed), \
      tu_failed)
 
+/** Runtime NaN without constant folding (keeps -Werror quiet). */
+static inline float tu_nan(void)
+{
+    volatile float zero = 0.0f;
+
+    return zero / zero;
+}
+
+/** Runtime +Inf without constant folding. */
+static inline float tu_inf(void)
+{
+    volatile float zero = 0.0f;
+
+    return 1.0f / zero;
+}
 #endif /* TEST_UTIL_H */

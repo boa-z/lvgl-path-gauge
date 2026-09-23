@@ -8,6 +8,7 @@
 #ifndef PATH2D_TYPES_H
 #define PATH2D_TYPES_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,14 +17,10 @@ extern "C" {
 #endif
 
 #define PATH2D_VERSION_MAJOR 0
-#define PATH2D_VERSION_MINOR 1
+#define PATH2D_VERSION_MINOR 2
 #define PATH2D_VERSION_PATCH 0
 
-/* v1 uses float throughout (see README floating-point policy). */
-#ifndef PG_USE_FLOAT
-#define PG_USE_FLOAT 1
-#endif
-
+/** Scalar type used by all geometry (v1 is float-only by design). */
 typedef float pg_float_t;
 
 /** Smallest magnitude treated as nonzero in geometric predicates. */
@@ -40,8 +37,8 @@ typedef float pg_float_t;
 /** Operation outcome codes. */
 typedef enum {
     PG_OK = 0,                 /**< Success. */
-    PG_ERR_INVALID_ARG,        /**< NULL pointer or NaN/out-of-domain scalar argument. */
-    PG_ERR_INVALID_PATH,       /**< Structurally invalid path (empty, bad first command...). */
+    PG_ERR_INVALID_ARG,        /**< NULL pointer, NaN/domain error or misuse. */
+    PG_ERR_INVALID_PATH,       /**< Structurally invalid or non-finite path. */
     PG_ERR_WORKSPACE_TOO_SMALL, /**< Caller workspace exhausted; geometry NOT truncated. */
     PG_ERR_DEGENERATE          /**< Valid structure but zero measurable length. */
 } pg_result_t;
@@ -61,7 +58,12 @@ typedef enum {
     PG_CMD_CLOSE     /**< Straight span back to the subpath start. */
 } pg_cmd_type_t;
 
-/** Single path command (p0 is the cursor position before the command). */
+/**
+ * Single path command (p0 is the cursor position before the command).
+ *
+ * Only the coordinates consumed by the opcode need to be valid; unused slots
+ * may hold any bit pattern. All consumed coordinates must be finite.
+ */
 typedef struct {
     pg_cmd_type_t type; /**< Opcode, see pg_cmd_type_t. */
     pg_point_t p1;      /**< MOVE/LINE target, QUAD/CUBIC first control. */

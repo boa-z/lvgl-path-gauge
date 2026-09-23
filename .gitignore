@@ -1,0 +1,7 @@
+build*/
+out/
+.cache/
+compile_commands.json
+*.o
+*.a
+.DS_Store

@@ -1,0 +1,3 @@
+# Enforce LF line endings for all text files (cross-platform repo).
+* text=auto eol=lf
+*.png binary

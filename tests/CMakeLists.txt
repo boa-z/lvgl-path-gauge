@@ -1,0 +1,12 @@
+foreach(t bezier path flatten measure)
+    add_executable(test_${t} test_${t}.c)
+    target_link_libraries(test_${t} PRIVATE path2d)
+    target_include_directories(test_${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME ${t} COMMAND test_${t})
+endforeach()
+
+add_executable(bench_measure bench_measure.c)
+target_link_libraries(bench_measure PRIVATE path2d)
+target_include_directories(bench_measure PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME bench COMMAND bench_measure)
+set_tests_properties(bench PROPERTIES PASS_REGULAR_EXPRESSION "queries/sec")

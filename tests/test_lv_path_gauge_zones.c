@@ -130,8 +130,19 @@ int main(void)
                                            LV_PATH_GAUGE_MAX_SAMPLES, g_vertices,
                                            g_distances, LV_PATH_GAUGE_MAX_VERTICES,
                                            0.5f) == PG_OK);
+    for (i = 0; i < (int)LV_PATH_GAUGE_MAX_VERTICES; i++) {
+        g_distances[i] = -1.0f; /* sentinel: count the vertices set_path writes */
+    }
     TU_EXPECT(lv_path_gauge_set_path(gauge, &g_arch_path, &g_ws) == PG_OK);
-    TU_EXPECT(lv_path_gauge_get_total_distance(gauge) > 100.0f);
+    {
+        uint16_t count = 0;
+
+        while (count < LV_PATH_GAUGE_MAX_VERTICES && g_distances[count] >= 0.0f) {
+            count++;
+        }
+        TU_EXPECT(count > 2u);
+        TU_EXPECT(g_distances[count - 1u] > 100.0f);
+    }
 
     /* Production SOC segmentation: [0,20) red, [20,40) orange, [40,100] green. */
     zones[0] = (lv_path_gauge_zone_t){ 0, 20, red };
@@ -157,8 +168,10 @@ int main(void)
         TU_EXPECT(tracks[i] > 1000u);
     }
 
-    /* Half-open zone semantics at the boundaries (20 and 40 belong to the
-     * previous zone; the next zone starts strictly after them). */
+    /* Half-open zone semantics at the boundaries: [start, end) excludes end,
+     * so a boundary value belongs to the LATER zone -- but at that exact value
+     * the later zone's visible length is zero and only the earlier interval is
+     * painted. */
     TU_EXPECT(reds[1] > 0u && oranges[1] == 0u && greens[1] == 0u); /* 1% */
     TU_EXPECT(reds[2] > reds[1]);                                   /* 19% */
     TU_EXPECT(oranges[2] == 0u && greens[2] == 0u);
@@ -193,7 +206,8 @@ int main(void)
     }
     /* Rounded caps only at the true end of the whole active run: the terminal
      * run carries a cap that disappears when the next zone takes over (the
-     * internal boundary is butt-capped). */
+     * internal boundary is butt-capped, with the geometry joints inside a run
+     * filled by same-colour caps instead). */
     TU_EXPECT(reds[4] < reds[3]);
     TU_EXPECT(oranges[7] < oranges[6]);
 

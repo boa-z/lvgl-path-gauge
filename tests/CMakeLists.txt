@@ -14,7 +14,7 @@ set_tests_properties(bench PROPERTIES PASS_REGULAR_EXPRESSION "queries/sec")
 
 # LVGL integration tests (only when the gauge widget is being built).
 if(LV_PATH_GAUGE_BUILD)
-    foreach(t lv_path_gauge lv_path_gauge_draw lv_path_gauge_zones)
+    foreach(t lv_path_gauge lv_path_gauge_draw lv_path_gauge_zones lv_path_gauge_joints)
         add_executable(test_${t} test_${t}.c)
         target_link_libraries(test_${t} PRIVATE lv_path_gauge::lv_path_gauge
                                                 path2d_dev_flags)

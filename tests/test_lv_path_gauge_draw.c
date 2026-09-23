@@ -79,8 +79,19 @@ int main(void)
                                            LV_PATH_GAUGE_MAX_SAMPLES, g_vertices,
                                            g_distances, LV_PATH_GAUGE_MAX_VERTICES,
                                            0.5f) == PG_OK);
+    for (uint16_t i = 0; i < LV_PATH_GAUGE_MAX_VERTICES; i++) {
+        g_distances[i] = -1.0f; /* sentinel: count the vertices set_path writes */
+    }
     TU_EXPECT(lv_path_gauge_set_path(gauge, &g_s_path, &g_ws) == PG_OK);
-    TU_EXPECT(lv_path_gauge_get_total_distance(gauge) > 100.0f);
+    {
+        uint16_t count = 0;
+
+        while (count < LV_PATH_GAUGE_MAX_VERTICES && g_distances[count] >= 0.0f) {
+            count++;
+        }
+        TU_EXPECT(count > 2u);
+        TU_EXPECT(g_distances[count - 1u] > 100.0f);
+    }
 
     /* 0%: track only. */
     render_and_count(&td, gauge, 0, &track0, &progress0);

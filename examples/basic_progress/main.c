@@ -279,9 +279,8 @@ int main(int argc, char **argv)
     lv_path_gauge_set_range(g_gauge, 0, 100);
     lv_path_gauge_set_value(g_gauge, 0);
 
-    printf("basic_progress: display=%s total=%.2fpx workspace=%uB\n",
+    printf("basic_progress: display=%s workspace=%uB\n",
            g_memory_display ? "memory" : "sdl-window",
-           (double)lv_path_gauge_get_total_distance(g_gauge),
            (unsigned)sizeof(lv_path_gauge_workspace_t));
 
     /* Snapshot frames at 0 / 50 / 100 % (headless only). */

@@ -180,16 +180,6 @@ float lv_path_gauge_get_value_fraction(const lv_obj_t *obj)
     return gauge_value_fraction(gauge, gauge->value);
 }
 
-float lv_path_gauge_get_total_distance(const lv_obj_t *obj)
-{
-    const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
-
-    if (gauge == NULL) {
-        return 0.0f;
-    }
-    return gauge->total_distance;
-}
-
 int32_t lv_path_gauge_get_value(const lv_obj_t *obj)
 {
     const lv_path_gauge_t *gauge = gauge_from_const_obj(obj);
@@ -443,9 +433,11 @@ pg_result_t lv_path_gauge_set_path(lv_obj_t *obj, const pg_path_t *path,
  * Draws the cached polyline clipped to the distance window [from, to].
  *
  * Sub-ranges are interpolated by their stored cumulative distances, so no
- * measure/slice/flatten work happens per frame. Within one run, rounded caps
- * are applied only at the first and last emitted segment; the joints in
- * between stay flat so adjacent runs (zone boundaries) never show caps.
+ * measure/slice/flatten work happens per frame. Every geometry joint inside
+ * the run is filled with a same-colour round cap (LVGL draws it as a disc of
+ * the line width), while the run's own ends stay flat unless the run style
+ * asks for the rounded outer cap: semantic boundaries (zone edges, progress
+ * end) must never bleed a cap into the neighbouring colour.
  */
 static void gauge_draw_run(lv_layer_t *layer, lv_obj_t *obj,
                            const lv_path_gauge_t *gauge, uint32_t part, float from,
@@ -490,9 +482,14 @@ static void gauge_draw_run(lv_layer_t *layer, lv_obj_t *obj,
             continue;
         }
         if (have_pending) {
-            /* Flush the previous segment with butt caps: joins stay continuous. */
+            /* Geometry joint: LVGL's round cap is a same-colour disc of the
+             * line width centred on the endpoint, so it fills the wedge that
+             * a butt joint would leave on the outside of the bend (visible as
+             * a background/track seam at thick widths). Semantic boundaries
+             * never take this cap: the run ends below keep their flat butt
+             * cut. */
             dsc.round_start = 0;
-            dsc.round_end = 0;
+            dsc.round_end = 1;
             dsc.p1.x = gauge_coord(pending_a.x) + x_ofs;
             dsc.p1.y = gauge_coord(pending_a.y) + y_ofs;
             dsc.p2.x = gauge_coord(pending_b.x) + x_ofs;
@@ -517,13 +514,31 @@ static void gauge_draw_run(lv_layer_t *layer, lv_obj_t *obj,
 }
 
 /**
+ * Local overlap compensation for internal colour boundaries.
+ *
+ * Two butt-capped sub-runs meeting exactly at a zone boundary leave a ~1px
+ * antialiased seam in LVGL 9.1's software rasterizer (neither side covers the
+ * cut line). Later sub-runs therefore start this many pixels early. The value
+ * is a fixed ~1px and is deliberately NOT scaled with the line width.
+ */
+#define LV_PATH_GAUGE_BOUNDARY_OVERLAP 1.0f
+
+/** Clip start of a sub-run: internal boundaries start one overlap early. */
+static float gauge_run_from(float distance)
+{
+    return (distance > 0.0f) ? (distance - LV_PATH_GAUGE_BOUNDARY_OVERLAP)
+                             : 0.0f;
+}
+
+/**
  * Partitions [min_value, value] into base/zone sub-runs and draws them.
  *
  * Zones are half-open [start, end) in the value domain and are clipped to the
  * active window at draw time; the stored configuration is never modified.
  * Gaps fall back to the LV_PART_INDICATOR base colour. The rounded indicator
  * style applies only to the outer start and the true end of the whole active
- * run, so internal zone boundaries stay flat.
+ * run, so internal zone boundaries stay flat; those boundaries get the small
+ * fixed overlap above instead of a cap.
  */
 static void gauge_draw_zones(lv_layer_t *layer, lv_obj_t *obj,
                              const lv_path_gauge_t *gauge, int32_t x_ofs,
@@ -547,7 +562,7 @@ static void gauge_draw_zones(lv_layer_t *layer, lv_obj_t *obj,
             style = (gauge_run_style_t){ rounded && first, false, false,
                                          lv_color_black() };
             gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
-                           gauge_value_to_distance(gauge, v_cursor),
+                           gauge_run_from(gauge_value_to_distance(gauge, v_cursor)),
                            gauge_value_to_distance(gauge, zs), x_ofs, y_ofs, &style);
             first = false;
         }
@@ -555,7 +570,7 @@ static void gauge_draw_zones(lv_layer_t *layer, lv_obj_t *obj,
         style = (gauge_run_style_t){ rounded && first, rounded && (ze >= v_hi), true,
                                      gauge->zones[z].color };
         gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
-                       gauge_value_to_distance(gauge, zs),
+                       gauge_run_from(gauge_value_to_distance(gauge, zs)),
                        gauge_value_to_distance(gauge, ze), x_ofs, y_ofs, &style);
         first = false;
         v_cursor = ze;
@@ -565,7 +580,7 @@ static void gauge_draw_zones(lv_layer_t *layer, lv_obj_t *obj,
                                     lv_color_black() };
 
         gauge_draw_run(layer, obj, gauge, LV_PART_INDICATOR,
-                       gauge_value_to_distance(gauge, v_cursor),
+                       gauge_run_from(gauge_value_to_distance(gauge, v_cursor)),
                        gauge_value_to_distance(gauge, v_hi), x_ofs, y_ofs, &style);
     }
 }

@@ -9,6 +9,9 @@
  * -> lv_draw_line_dsc_init -> lv_obj_init_draw_line_dsc -> lv_draw_line.
  * LV_PART_MAIN styles the static track, LV_PART_INDICATOR the active progress.
  * Optional value-domain zones recolour the progress without per-zone objects.
+ * Geometry joints inside one continuous colour run are filled with same-colour
+ * caps so no background can show through; only the true start and end of the
+ * track/progress follow the line_rounded style, and zone boundaries stay flat.
  *
  * The widget never allocates for path geometry: the caller owns the LUT, the
  * flattened polyline and the distance table, and the gauge only borrows them.
@@ -106,9 +109,12 @@ pg_result_t lv_path_gauge_workspace_init(lv_path_gauge_workspace_t *workspace,
 /**
  * One value-domain colour zone: progress inside [start, end) uses @ref color.
  *
- * Zones are half-open so adjacent zones share a boundary value without
- * overlapping; gaps between zones are allowed and fall back to the
- * LV_PART_INDICATOR base colour.
+ * The range is half-open: @ref start is included, @ref end is excluded, so a
+ * value equal to a boundary belongs to the LATER zone. At exactly that value
+ * the later zone's intersection with the active progress is empty (zero
+ * visible length), hence only the earlier interval is painted. Adjacent zones
+ * may touch (end == next start) without overlapping; gaps between zones are
+ * allowed and fall back to the LV_PART_INDICATOR base colour.
  */
 typedef struct {
     int32_t start;    /**< Zone start value (inclusive). */
@@ -249,15 +255,6 @@ int32_t lv_path_gauge_get_max(const lv_obj_t *obj);
  * Returns 0 when the range is empty.
  */
 float lv_path_gauge_get_value_fraction(const lv_obj_t *obj);
-
-/**
- * @brief Polyline length of the installed path.
- *
- * @param[in] obj  Gauge object.
- * @return         Total cached polyline length in object-local pixels;
- *                 0.0f when obj is NULL or no path is installed.
- */
-float lv_path_gauge_get_total_distance(const lv_obj_t *obj);
 
 #ifdef __cplusplus
 }

@@ -302,12 +302,11 @@ int main(int argc, char **argv)
     }
     lv_path_gauge_set_value(g_gauge, 0);
 
-    printf("segmented_soc: display=%s zones=%u total=%.2fpx workspace=%uB\n",
+    printf("segmented_soc: display=%s zones=%u workspace=%uB\n",
            g_memory_display ? "memory" : "sdl-window", 3u,
-           (double)lv_path_gauge_get_total_distance(g_gauge),
            (unsigned)sizeof(lv_path_gauge_workspace_t));
 
-    /* Snapshot frames at the zone boundaries and at full scale. */
+    /* Snapshot frames at the zone boundaries, mid-zone and at full scale. */
     render_frame();
     write_ppm(opt.output_dir, "segmented_soc_000.ppm");
     lv_path_gauge_set_value(g_gauge, 20);
@@ -316,6 +315,9 @@ int main(int argc, char **argv)
     lv_path_gauge_set_value(g_gauge, 40);
     render_frame();
     write_ppm(opt.output_dir, "segmented_soc_040.ppm");
+    lv_path_gauge_set_value(g_gauge, 53);
+    render_frame();
+    write_ppm(opt.output_dir, "segmented_soc_053.ppm");
     lv_path_gauge_set_value(g_gauge, 100);
     render_frame();
     write_ppm(opt.output_dir, "segmented_soc_100.ppm");

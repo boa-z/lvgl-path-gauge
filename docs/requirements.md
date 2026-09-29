@@ -1,5 +1,8 @@
 # 原始需求（Original Requirements，§1–107）
 
+> Historical pre-split design record. Repository ownership and build instructions
+> are superseded by [migration](migration.md); no planned features are added by the split.
+
 > 本文件是 `lvgl-path-gauge` 原始任务书的收录版，使仓库规范自包含。
 > 规范性修订见 [](task-book.md) §108–111；两文件冲突时以修订为准。
 > 阶段状态：Phase 0–2 与 Phase 2.5/3 已完成，其余为后续阶段目标。

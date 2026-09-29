@@ -1,57 +1,36 @@
 # Architecture
 
-```text
-SVG design稿
-  |
-  v                 (Phase 7, host-side only)
-pg_path             static const commands, Flash resident
-  |
-  v                 (Phase 2)
-pg_measure          shared adaptive subdivision -> arc-length LUT
-  |                   (caller workspace) binary search + curve re-evaluation
-  +--> pg_measure_slice -> pg_path_writer_t  (Phase 3)
-  v                 (Phase 4+)
-renderer            LVGL line backend: track / progress / zones / ticks
-  |                   (vector backend stub reserved)
-  v
-lv_path_gauge       value/range/zones/needle widget, LVGL 9.1.0
-  |
-  v
-application         CAN/filtering/vehicle logic lives here, never below
-```
+## Repository dependency direction
 
-## Invariants
+    application
+       |-- lvgl-path-gauge  (widget, rendering, examples)
+       |       |-- LVGL    (object lifecycle and drawing)
+       |       +-- lv-path (generic geometry only)
+       +-- lv-path         (optional direct geometry consumer)
 
-- `Path != Gauge`: `path2d` knows nothing of SOC, speed, ticks or needles.
-- `Geometry != Rendering`: measurement and slicing never call draw APIs; they
-  hand out points, tangents and commands, the renderer decides how to paint.
-- `Rendering != Vehicle logic`: the gauge owns `value` only.
-- One path is the single geometric truth: track, progress, ticks and the
-  needle all derive from the same `pg_path_t`. No parallel
-  `needle_positions[]` / `tick_positions[]` tables.
+lv-path never depends on LVGL or lvgl-path-gauge. It accepts geometric
+commands and caller storage, and emits positions, tangents or path commands.
+It has no value ranges, colours, SOC or vehicle concepts. The widget maps
+application values and zones onto the measured path and issues LVGL draws.
+Product-specific paths and styling belong to examples or applications.
 
-## Shared subdivision engine (Phase 2.5)
+## Geometry ownership
 
-`pg_path_walk()` in `src/pg_subdiv.c` is the only place that subdivides
-curves; `pg_path_flatten()` and `pg_measure_init()` are thin consumers.
+All former libs/path2d headers and sources moved to the separate lv-path
+repository at third_party/lv-path. Its source, tests, license and C99 build
+are self-contained. Public path2d/pg_*.h headers and pg_* symbols are retained
+to keep this extraction source-compatible. There is one engine target,
+lv_path::lv_path (path2d::path2d is a compatibility alias).
 
-A span is emitted when both flatness conditions hold:
+The dependency is pinned by a Git submodule commit. CMake may reuse an
+already supplied lv_path::lv_path target or explicitly selected source root;
+it never downloads geometry at configure time. See [migration](migration.md)
+for checkout and publication details.
 
-```text
-perpendicular deviation: max control distance to the chord <= tolerance
-control-polygon excess:   polygon length - chord length   <= tolerance
-```
-
-The second condition exists because the perpendicular test alone is blind to
-collinear overshoot/backtracking: for M(0,0) Q(100,0) (10,0) every control
-point lies on the chord, yet the curve overshoots to x ~ 52.63 and returns to
-x = 10 (arc length ~ 95.2632, chord 10). Monotone collinear spans have zero
-excess and still flatten in a single step, so smooth instrument curves keep
-their previous sample counts.
-
-Bisection uses De Casteljau (`pg_quad_split` / `pg_cubic_split`) and is
-bounded by `PG_MAX_RECURSION`; leaf spans carry the owning command index and
-their local [t0, t1] so the LUT can use them directly.
+Subdivision, flattening, arc-length approximation, slicing and numerical
+contracts belong to lv-path; its src/pg_subdiv.c is the shared subdivision
+implementation. The widget's single-open-contour restriction is a widget
+policy and does not constrain the generic engine's multi-contour support.
 
 ## Gauge pipeline (Phase 4.5 + 5)
 
@@ -160,8 +139,8 @@ widget instance.
 
 ## Upstream note
 
-The piece with upstream value is **path measurement**
-(length / point-at-distance / tangent / slice), not the gauge widget.
-`docs/upstream-plan.md` (Phase 10) will map `pg_measure_*` onto a candidate
-LVGL vector-path measurement API. Product APIs must not be held hostage to
-future LVGL assumptions.
+The candidate for upstream discussion is the independent lv-path geometry
+repository. Public naming, integration and numerical/resource contracts
+still need maintainer review; see [migration](migration.md). Gauge application
+policies and demos remain in this repository. No upstream proposal, API
+renaming or new widget feature is part of this split.

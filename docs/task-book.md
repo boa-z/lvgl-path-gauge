@@ -1,5 +1,8 @@
 # Task Book（任务书）
 
+> Historical pre-split design record. Repository ownership and build instructions
+> are superseded by [migration](migration.md); no planned features are added by the split.
+
 > `docs/requirements.md` 收录原始任务书 §1–107（本项目规范的自包含主体）；
 > 本文件记录其后的规范性修订 §108–117。两者共同构成 `lvgl-path-gauge` 的
 > 约束性任务书。

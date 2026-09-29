@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — repository separation
+
+- Extract geometry and its test history into the standalone C99 lv-path repository.
+- Consume a pinned lv-path submodule; retain widget and public C APIs.
+- Separate build options and register both existing demo smoke tests in CTest.
+- Document ownership, migration and validation/publication limits.
+
 All notable changes to this project will be documented in this file.
 
 ## [0.5.0] - candidate
